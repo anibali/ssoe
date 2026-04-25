@@ -1,26 +1,146 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
+import { scanFile } from "./llmClient";
+import {
+  SsoeCodeActionProvider,
+  SSOE_SOURCE,
+  applySurgicalFix,
+  applyJustificationComment,
+} from "./codeActions";
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
+const SUPPORTED_LANGUAGES = [
+  "python",
+  "javascript",
+  "typescript",
+  "javascriptreact",
+  "typescriptreact",
+];
+
+let diagnosticCollection: vscode.DiagnosticCollection;
+
 export function activate(context: vscode.ExtensionContext) {
+  diagnosticCollection =
+    vscode.languages.createDiagnosticCollection(SSOE_SOURCE);
+  context.subscriptions.push(diagnosticCollection);
 
-  // Use the console to output diagnostic information (console.log) and errors (console.error)
-  // This line of code will only be executed once when your extension is activated
-  console.log('Congratulations, your extension "ssoe" is now active!');
+  // ── Command: scan the current file ────────────────────────────────────────
+  const scanCommand = vscode.commands.registerCommand(
+    "ssoe.scanFile",
+    async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showWarningMessage("SSOE: No active editor.");
+        return;
+      }
+      if (!SUPPORTED_LANGUAGES.includes(editor.document.languageId)) {
+        vscode.window.showWarningMessage(
+          `SSOE: Unsupported language "${editor.document.languageId}".`
+        );
+        return;
+      }
 
-  // The command has been defined in the package.json file
-  // Now provide the implementation of the command with registerCommand
-  // The commandId parameter must match the command field in package.json
-  const disposable = vscode.commands.registerCommand('ssoe.helloWorld', () => {
-    // The code you place here will be executed every time your command is executed
-    // Display a message box to the user
-    vscode.window.showInformationMessage('Hello World from ssoe!');
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "SSOE: Scanning file…",
+          cancellable: false,
+        },
+        async () => {
+          try {
+            const diagnostics = await scanFile(
+              editor.document.getText(),
+              editor.document.languageId
+            );
+
+            const vscodeDiagnostics = diagnostics.map((d) => {
+              // Line numbers from LLM are 1-indexed; VS Code is 0-indexed
+              const lineIndex = Math.max(0, d.line - 1);
+              const line = editor.document.lineAt(
+                Math.min(lineIndex, editor.document.lineCount - 1)
+              );
+              const range = new vscode.Range(
+                line.range.start,
+                line.range.end
+              );
+              const severity =
+                d.severity === "error"
+                  ? vscode.DiagnosticSeverity.Error
+                  : d.severity === "info"
+                  ? vscode.DiagnosticSeverity.Information
+                  : vscode.DiagnosticSeverity.Warning;
+
+              const diagnostic = new vscode.Diagnostic(
+                range,
+                d.message,
+                severity
+              );
+              diagnostic.source = SSOE_SOURCE;
+              return diagnostic;
+            });
+
+            diagnosticCollection.set(
+              editor.document.uri,
+              vscodeDiagnostics
+            );
+
+            const count = vscodeDiagnostics.length;
+            vscode.window.showInformationMessage(
+              count === 0
+                ? "SSOE: No issues found."
+                : `SSOE: Found ${count} issue${count === 1 ? "" : "s"}.`
+            );
+          } catch (err) {
+            vscode.window.showErrorMessage(`SSOE: ${err}`);
+          }
+        }
+      );
+    }
+  );
+
+  // ── Clear diagnostics when the file is edited ─────────────────────────────
+  const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
+    diagnosticCollection.delete(event.document.uri);
   });
 
-  context.subscriptions.push(disposable);
+  // ── Command: apply surgical fix ───────────────────────────────────────────
+  const fixCommand = vscode.commands.registerCommand(
+    "ssoe.applySurgicalFix",
+    async (document: vscode.TextDocument, diagnostic: vscode.Diagnostic) => {
+      try {
+        await applySurgicalFix(document, diagnostic);
+      } catch (err) {
+        vscode.window.showErrorMessage(`SSOE fix failed: ${err}`);
+      }
+    }
+  );
+
+  // ── Command: add justification comment ────────────────────────────────────
+  const commentCommand = vscode.commands.registerCommand(
+    "ssoe.applyJustificationComment",
+    async (document: vscode.TextDocument, diagnostic: vscode.Diagnostic) => {
+      try {
+        await applyJustificationComment(document, diagnostic);
+      } catch (err) {
+        vscode.window.showErrorMessage(`SSOE comment failed: ${err}`);
+      }
+    }
+  );
+
+  // ── Code action provider (lightbulb) ──────────────────────────────────────
+  const codeActionProvider = vscode.languages.registerCodeActionsProvider(
+    SUPPORTED_LANGUAGES.map((lang) => ({ language: lang })),
+    new SsoeCodeActionProvider(),
+    { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }
+  );
+
+  context.subscriptions.push(
+    scanCommand,
+    changeListener,
+    fixCommand,
+    commentCommand,
+    codeActionProvider
+  );
 }
 
-// This method is called when your extension is deactivated
-export function deactivate() {}
+export function deactivate() {
+  diagnosticCollection?.dispose();
+}
