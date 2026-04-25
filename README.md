@@ -33,6 +33,7 @@ Add to your VS Code `settings.json`:
 {
   "ssoe.enabled": true,
   "ssoe.llmProvider": "openai-compatible",
+  "ssoe.apiKey": "not-needed",
   "ssoe.llmBaseUrl": "http://localhost:1234",
   "ssoe.llmModel": "unsloth/gemma-4-E2B-it-GGUF:Q4_K_M",
   "ssoe.debounceMs": 2000,

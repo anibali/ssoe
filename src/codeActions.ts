@@ -89,30 +89,28 @@ export async function applyJustificationComment(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic
 ): Promise<void> {
+  const code = document.getText();
   const lineIndex = diagnostic.range.start.line;
   const lineText = document.lineAt(lineIndex).text;
+  const filePath = document.uri.fsPath;
 
-  // Detect indentation of the flagged line so the comment aligns with it
-  const indent = lineText.match(/^(\s*)/)?.[1] ?? "";
-
-  const comment = await vscode.window.withProgress(
+  const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "SSOE: Generating comment…" },
     () =>
       getJustificationComment(
+        code,
         lineIndex + 1,
         lineText,
         diagnostic.message,
-        document.languageId
+        document.languageId,
+        filePath
       )
   );
 
-  if (!comment) {
-    vscode.window.showWarningMessage("SSOE: LLM returned an empty comment.");
+  if (!result.success) {
+    vscode.window.showErrorMessage(`SSOE justification comment failed: ${result.message}`);
     return;
   }
 
-  const edit = new vscode.WorkspaceEdit();
-  const insertPosition = new vscode.Position(lineIndex, 0);
-  edit.insert(document.uri, insertPosition, `${indent}${comment}\n`);
-  await vscode.workspace.applyEdit(edit);
+  vscode.window.showInformationMessage(`SSOE: ${result.message}`);
 }

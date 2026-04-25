@@ -13,11 +13,13 @@ function getClient(): { client: OpenAI; model: string; maxTokens: number } {
   const cfg = vscode.workspace.getConfiguration("ssoe");
   const baseURL = cfg.get<string>("llmBaseUrl", "http://localhost:8080");
   const model = cfg.get<string>("llmModel", "llama");
-  const maxTokens = cfg.get<number>("maxTokens", 2048);
+  const maxTokens = cfg.get<number>("maxTokens", 4096);
+
+  const apiKey = cfg.get<string>("apiKey", "not-needed");
 
   const client = new OpenAI({
     baseURL: baseURL + "/v1",
-    apiKey: "not-needed",
+    apiKey: apiKey,
   });
 
   return { client, model, maxTokens };
@@ -27,6 +29,11 @@ const SCAN_SYSTEM_PROMPT = `You are an expert code reviewer acting as a semantic
 Analyze the code and identify real problems: logic errors, bugs, missing returns,
 unreachable code, bad practices, and subtle issues that rule-based linters miss.
 Do NOT flag style preferences or things that are clearly intentional.
+Read docstrings and comments to determine whether suspected issues
+have already been acknowledged or are accepted as intended behaviour
+(do not report these).
+The user's time is precious, so do not be overly pedantic.
+It is often correct to return no issues, so do that when appropriate.
 
 Return ONLY a valid JSON array. Each element must be:
 {"line": <1-indexed integer>, "severity": "error"|"warning"|"info", "message": "<concise one-line description>"}
@@ -68,6 +75,11 @@ export async function scanFile(
       },
     ],
   });
+
+  const finishReason = completion.choices[0]?.finish_reason;
+  if (finishReason && finishReason !== "stop") {
+    logger.log(`\n⚠️  WARNING: Model finish_reason: "${finishReason}"`);
+  }
 
   const raw = completion.choices[0]?.message?.content ?? "";
   logger.log(`\n--- raw response ---\n${raw}`);
@@ -114,25 +126,23 @@ export async function getToolBasedEdit(
   filePath: string
 ): Promise<{ success: boolean; message: string; applied?: number }> {
   const { client, model } = getClient();
+  const MAX_RETRIES = 3;
 
   logger.log(divider(`TOOL-BASED EDIT  ${filePath}  ${new Date().toLocaleTimeString()}`));
   logger.log(`issue: ${diagnosticMessage}`);
 
-  const completion = await client.chat.completions.create({
-    model,
-    max_tokens: 4096,
-    temperature: 0,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are fixing code issues. Use the edit_file tool to apply fixes. " +
-          "Be precise: keep oldText minimal but unique. " +
-          "For multiple changes, include multiple edits in one tool call.",
-      },
-      {
-        role: "user",
-        content: `Language: ${languageId}
+  // Build conversation history for potential retries
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    {
+      role: "system",
+      content:
+        "You are fixing code issues. Use the edit_file tool to apply fixes. " +
+        "Be precise: keep oldText minimal but unique. " +
+        "For multiple changes, include multiple edits in one tool call.",
+    },
+    {
+      role: "user",
+      content: `Language: ${languageId}
 File: ${filePath}
 
 Issue to fix: ${diagnosticMessage}
@@ -141,72 +151,242 @@ Full file:
 \`\`\`${languageId}
 ${code}
 \`\`\``,
-      },
-    ],
-    tools: [EDIT_TOOL],
-    tool_choice: "required", // Force tool use
-  });
+    },
+  ];
 
-  const message = completion.choices[0]?.message;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    logger.log(`\n--- attempt ${attempt} ---`);
 
-  if (!message?.tool_calls?.length) {
-    throw new Error("Model did not use the edit tool");
+    const completion = await client.chat.completions.create({
+      model,
+      max_tokens: 4096,
+      temperature: 0,
+      messages: messages,
+      tools: [EDIT_TOOL],
+      tool_choice: "required",
+    });
+
+    const message = completion.choices[0]?.message;
+    const finishReason = completion.choices[0]?.finish_reason;
+    if (finishReason && finishReason !== "stop" && finishReason !== "tool_calls") {
+      logger.log(`\n⚠️  WARNING: Model finish_reason: "${finishReason}"`);
+    }
+
+    if (!message?.tool_calls?.length) {
+      throw new Error("Model did not use the edit tool");
+    }
+
+    const toolCall = message.tool_calls[0];
+
+    // Parse tool call arguments, catch parsing errors to allow retry
+    let input: EditToolInput;
+    try {
+      input = parseEditToolCall(toolCall.function.arguments);
+    } catch (parseError) {
+      const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
+      logger.log(`\n--- parse error ---\n${errorMsg}`);
+
+      // Add assistant's tool call to conversation history
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: toolCall.id,
+          type: "function",
+          function: {
+            name: toolCall.function.name,
+            arguments: toolCall.function.arguments,
+          },
+        }],
+      });
+
+      // Inform model of parse failure
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: `Failed to parse edit tool call: ${errorMsg}. Please ensure arguments are valid JSON with "path" and "edits" array.`,
+      });
+
+      // Continue to next retry attempt
+      continue;
+    }
+
+    input.path = filePath;
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const result = await executeEdit(input, workspaceRoot);
+
+    logger.log(`\n--- edit result ---\n${JSON.stringify(result, null, 2)}`);
+
+    if (result.success) {
+      logger.show();
+      return result;
+    }
+
+    if (attempt === MAX_RETRIES) {
+      logger.show();
+      return result;
+    }
+
+    logger.log(`\n--- retrying after failure: ${result.message} ---`);
+
+    messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: toolCall.id,
+        type: "function",
+        function: {
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments,
+        },
+      }],
+    });
+
+    messages.push({
+      role: "tool",
+      tool_call_id: toolCall.id,
+      content: `Edit failed: ${result.message}. Please try again with a different edit. Make sure oldText matches exactly (including whitespace) and is unique in the file.`,
+    });
   }
 
-  const toolCall = message.tool_calls[0];
-  const input: EditToolInput = parseEditToolCall(toolCall.function.arguments);
-
-  // Override path with the actual file path
-  input.path = filePath;
-
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  const result = await executeEdit(input, workspaceRoot);
-
-  logger.log(`\n--- edit result ---\n${JSON.stringify(result, null, 2)}`);
   logger.show();
-
-  return result;
+  return { success: false, message: "Max retries exceeded" };
 }
 
+// FIXME: There's a lot of code duplication to sort out here.
 export async function getJustificationComment(
+  code: string,
   lineNumber: number,
   lineText: string,
   diagnosticMessage: string,
-  languageId: string
-): Promise<string> {
+  languageId: string,
+  filePath: string
+): Promise<{ success: boolean; message: string; applied?: number }> {
   const { client, model } = getClient();
+  const MAX_RETRIES = 3;
 
   logger.log(divider(`JUSTIFY  line ${lineNumber}  ${new Date().toLocaleTimeString()}`));
   logger.log(`issue: ${diagnosticMessage}`);
 
-  const commentChar = ["python", "ruby", "shellscript"].includes(languageId)
-    ? "#"
-    : "//";
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    {
+      role: "system",
+      content:
+        "You are writing a concise code comment or concise documentation " +
+        "in nearby location to justify an intentional code pattern. " +
+        "Use the edit_file tool to provide your comment/documentation.",
+    },
+    {
+      role: "user",
+      content:
+        `Language: ${languageId}\n` +
+        `File: ${filePath}` +
+        `Line ${lineNumber}: ${lineText}\n` +
+        `Flagged as: ${diagnosticMessage}\n\n` +
+        `Full file:\n` +
+        `\`\`\`${languageId}\n` +
+        `${code}\n` +
+        `\`\`\``,
+    },
+  ]
 
-  const completion = await client.chat.completions.create({
-    model,
-    max_tokens: 128,
-    temperature: 0,
-    messages: [
-      {
-        role: "system",
-        content:
-          `You are writing a code comment to justify an intentional code pattern. ` +
-          `Return ONLY the comment line starting with "${commentChar}". No explanation, no extra text.`,
-      },
-      {
-        role: "user",
-        content:
-          `Language: ${languageId}\n` +
-          `Line ${lineNumber}: ${lineText}\n` +
-          `Flagged as: ${diagnosticMessage}\n\n` +
-          `Write a single-line comment explaining why this is intentional and should not be changed.`,
-      },
-    ],
-  });
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    logger.log(`\n--- attempt ${attempt} ---`);
 
-  const result = (completion.choices[0]?.message?.content ?? "").trim();
-  logger.log(`\n--- response ---\n${result}`);
+    const completion = await client.chat.completions.create({
+      model,
+      max_tokens: 4096,
+      temperature: 0,
+      messages: messages,
+      tools: [EDIT_TOOL],
+      tool_choice: "required",
+    });
+
+    const message = completion.choices[0]?.message;
+    const finishReason = completion.choices[0]?.finish_reason;
+    if (finishReason && finishReason !== "stop" && finishReason !== "tool_calls") {
+      logger.log(`\n⚠️  WARNING: Model finish_reason: "${finishReason}"`);
+    }
+
+    if (!message?.tool_calls?.length) {
+      throw new Error("Model did not use the edit tool");
+    }
+
+    const toolCall = message.tool_calls[0];
+
+    // Parse tool call arguments, catch parsing errors to allow retry
+    let input: EditToolInput;
+    try {
+      input = parseEditToolCall(toolCall.function.arguments);
+    } catch (parseError) {
+      const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
+      logger.log(`\n--- parse error ---\n${errorMsg}`);
+
+      // Add assistant's tool call to conversation history
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: toolCall.id,
+          type: "function",
+          function: {
+            name: toolCall.function.name,
+            arguments: toolCall.function.arguments,
+          },
+        }],
+      });
+
+      // Inform model of parse failure
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: `Failed to parse edit tool call: ${errorMsg}. Please ensure arguments are valid JSON with "path" and "edits" array.`,
+      });
+
+      // Continue to next retry attempt
+      continue;
+    }
+
+    input.path = filePath;
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const result = await executeEdit(input, workspaceRoot);
+
+    logger.log(`\n--- edit result ---\n${JSON.stringify(result, null, 2)}`);
+
+    if (result.success) {
+      logger.show();
+      return result;
+    }
+
+    if (attempt === MAX_RETRIES) {
+      logger.show();
+      return result;
+    }
+
+    logger.log(`\n--- retrying after failure: ${result.message} ---`);
+
+    messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: toolCall.id,
+        type: "function",
+        function: {
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments,
+        },
+      }],
+    });
+
+    messages.push({
+      role: "tool",
+      tool_call_id: toolCall.id,
+      content: `Edit failed: ${result.message}. Please try again with a different edit. Make sure oldText matches exactly (including whitespace) and is unique in the file.`,
+    });
+  }
+
   logger.show();
-  return result;
+  return { success: false, message: "Max retries exceeded" };
 }
