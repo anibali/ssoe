@@ -8,9 +8,9 @@ A VS Code extension that acts as a "semantic linter" using LLMs to provide proac
 - **Block-Level Fingerprinting**: Hashes individual code blocks. Edit line 50, and the AI won't re-scan line 10. Existing hints stay stable.
 - **Syntactic Resilience**: Scans code in chunks, providing feedback on "healthy" parts even when the file is mid-edit and syntactically broken.
 
-### 2. Surgical AI Fixes
+### 2. Tool-base AI Fixes
 The lightbulb menu (💡) offers two distinct paths:
-- **Surgical Fix**: The LLM rewrites the problematic line, matching your indentation, naming conventions (snake_case vs camelCase), and coding style.
+- **Tool-based Fix**: The LLM rewrites the problematic line, matching your indentation, naming conventions (snake_case vs camelCase), and coding style.
 - **Justification Comment**: Instead of cryptic `# type: ignore` tags, the AI writes a natural language comment explaining why the code is intentional. On future scans, the AI reads these comments and learns not to flag that line again.
 
 ### 3. Additional Tools
@@ -45,7 +45,7 @@ Add to your VS Code `settings.json`:
 1. Open a supported file (Python, JavaScript, TypeScript)
 2. SSOE automatically scans and shows diagnostics in the Problems Pane
 3. Click the lightbulb (💡) on any SSOE diagnostic to see fix options:
-   - 🔧 **Surgical Fix**: Rewrites the line in-place
+   - 🔧 **Tool-based Fix**: Rewrites the line in-place
    - 💬 **Add Justification Comment**: Adds a comment explaining why the code is intentional
 
 ### Commands (Command Palette: Ctrl+Shift+P)
@@ -59,7 +59,7 @@ Add to your VS Code `settings.json`:
 2. **Fingerprinting**: Each chunk is hashed. If unchanged, cached diagnostics are reused
 3. **LLM Analysis**: Chunks are sent to the LLM with a structured prompt requesting JSON output
 4. **Diagnostic Display**: Results appear as red/yellow squiggles in the editor
-5. **Fix Actions**: Lightbulb menu provides surgical fixes and justification comments
+5. **Fix Actions**: Lightbulb menu provides tool-based fixes and justification comments
 
 ## Example
 
@@ -80,5 +80,5 @@ Severity: Warning (style/logic)
 ```
 
 Lightbulb options:
-- 🔧 **Surgical Fix** → Adds `return total` at line 6
+- 🔧 **Tool-based Fix** → Adds `return total` at line 6
 - 💬 **Justification Comment** → Adds `# Intentionally not returning, side effects handled elsewhere`

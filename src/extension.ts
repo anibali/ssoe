@@ -3,8 +3,8 @@ import { scanFile } from "./llmClient";
 import {
   SsoeCodeActionProvider,
   SSOE_SOURCE,
-  applySurgicalFix,
   applyJustificationComment,
+  applyToolBasedEdit,
 } from "./codeActions";
 import * as logger from "./logger";
 
@@ -104,14 +104,14 @@ export function activate(context: vscode.ExtensionContext) {
     diagnosticCollection.delete(event.document.uri);
   });
 
-  // ── Command: apply surgical fix ───────────────────────────────────────────
+  // ── Command: apply tool-based fix ───────────────────────────────────────────
   const fixCommand = vscode.commands.registerCommand(
-    "ssoe.applySurgicalFix",
+    "ssoe.applyToolBasedEdit",
     async (document: vscode.TextDocument, diagnostic: vscode.Diagnostic) => {
       try {
-        await applySurgicalFix(document, diagnostic);
+        await applyToolBasedEdit(document, diagnostic);
       } catch (err) {
-        vscode.window.showErrorMessage(`SSOE fix failed: ${err}`);
+        vscode.window.showErrorMessage(`SSOE smart fix failed: ${err}`);
       }
     }
   );

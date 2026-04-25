@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { getSurgicalFix, getJustificationComment } from "./llmClient";
+import { getJustificationComment, getToolBasedEdit } from "./llmClient";
 
 export const SSOE_SOURCE = "SSOE";
 
@@ -17,25 +17,25 @@ export class SsoeCodeActionProvider implements vscode.CodeActionProvider {
     const actions: vscode.CodeAction[] = [];
 
     for (const diagnostic of diagnostics) {
-      actions.push(this.makeSurgicalFix(document, diagnostic));
+      actions.push(this.makeToolBasedEdit(document, diagnostic));
       actions.push(this.makeJustificationComment(document, diagnostic));
     }
 
     return actions;
   }
 
-  private makeSurgicalFix(
+  private makeToolBasedEdit(
     document: vscode.TextDocument,
     diagnostic: vscode.Diagnostic
   ): vscode.CodeAction {
     const action = new vscode.CodeAction(
-      `🔧 SSOE: Fix — ${diagnostic.message}`,
+      `🔨 SSOE: Smart Fix — ${diagnostic.message}`,
       vscode.CodeActionKind.QuickFix
     );
     action.diagnostics = [diagnostic];
     action.command = {
-      command: "ssoe.applySurgicalFix",
-      title: "Apply surgical fix",
+      command: "ssoe.applyToolBasedEdit",
+      title: "Apply smart fix using tool",
       arguments: [document, diagnostic],
     };
     return action;
@@ -59,34 +59,30 @@ export class SsoeCodeActionProvider implements vscode.CodeActionProvider {
   }
 }
 
-export async function applySurgicalFix(
+export async function applyToolBasedEdit(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic
 ): Promise<void> {
-  const lineIndex = diagnostic.range.start.line; // 0-indexed
-  const lineText = document.lineAt(lineIndex).text;
   const code = document.getText();
+  const filePath = document.uri.fsPath;
 
-  const replacement = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "SSOE: Generating fix…" },
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "SSOE: Smart fix using tool…" },
     () =>
-      getSurgicalFix(
+      getToolBasedEdit(
         code,
-        lineIndex + 1, // LLM sees 1-indexed
-        lineText,
+        document.languageId,
         diagnostic.message,
-        document.languageId
+        filePath
       )
   );
 
-  if (!replacement) {
-    vscode.window.showWarningMessage("SSOE: LLM returned an empty fix.");
+  if (!result.success) {
+    vscode.window.showErrorMessage(`SSOE smart fix failed: ${result.message}`);
     return;
   }
 
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(document.uri, document.lineAt(lineIndex).range, replacement);
-  await vscode.workspace.applyEdit(edit);
+  vscode.window.showInformationMessage(`SSOE: ${result.message}`);
 }
 
 export async function applyJustificationComment(

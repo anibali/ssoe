@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import OpenAI from "openai";
 import * as logger from "./logger";
+import { EDIT_TOOL, parseEditToolCall, executeEdit, type EditToolInput } from "./tools/edit";
 
 export interface LlmDiagnostic {
   line: number; // 1-indexed
@@ -106,55 +107,65 @@ export async function scanFile(
   return results;
 }
 
-export async function getSurgicalFix(
+export async function getToolBasedEdit(
   code: string,
-  lineNumber: number,
-  lineText: string,
+  languageId: string,
   diagnosticMessage: string,
-  languageId: string
-): Promise<string> {
+  filePath: string
+): Promise<{ success: boolean; message: string; applied?: number }> {
   const { client, model } = getClient();
 
-  logger.log(divider(`SURGICAL FIX  line ${lineNumber}  ${new Date().toLocaleTimeString()}`));
+  logger.log(divider(`TOOL-BASED EDIT  ${filePath}  ${new Date().toLocaleTimeString()}`));
   logger.log(`issue: ${diagnosticMessage}`);
 
   const completion = await client.chat.completions.create({
     model,
-    max_tokens: 2048,
+    max_tokens: 4096,
     temperature: 0,
     messages: [
       {
         role: "system",
         content:
-          "You are fixing a single line of code. Return ONLY the corrected replacement line, preserving the exact indentation. No explanation, no markdown, no line numbers.",
+          "You are fixing code issues. Use the edit_file tool to apply fixes. " +
+          "Be precise: keep oldText minimal but unique. " +
+          "For multiple changes, include multiple edits in one tool call.",
       },
       {
         role: "user",
         content: `Language: ${languageId}
-Line ${lineNumber} to fix: ${lineText}
-Issue: ${diagnosticMessage}
+File: ${filePath}
 
-Full file for context:
+Issue to fix: ${diagnosticMessage}
+
+Full file:
 \`\`\`${languageId}
 ${code}
 \`\`\``,
       },
     ],
+    tools: [EDIT_TOOL],
+    tool_choice: "required", // Force tool use
   });
 
-  logger.log(`\n--- completion object ---\n${JSON.stringify({
-    finish_reason: completion.choices[0]?.finish_reason,
-    message_role: completion.choices[0]?.message?.role,
-    content_type: typeof completion.choices[0]?.message?.content,
-    content_null: completion.choices[0]?.message?.content === null,
-    usage: completion.usage,
-  }, null, 2)}`);
+  const message = completion.choices[0]?.message;
 
-  const result = (completion.choices[0]?.message?.content ?? "");
-  logger.log(`\n--- response ---\n${result}`);
+  if (!message?.tool_calls?.length) {
+    throw new Error("Model did not use the edit tool");
+  }
+
+  const toolCall = message.tool_calls[0];
+  const input: EditToolInput = parseEditToolCall(toolCall.function.arguments);
+
+  // Override path with the actual file path
+  input.path = filePath;
+
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const result = await executeEdit(input, workspaceRoot);
+
+  logger.log(`\n--- edit result ---\n${JSON.stringify(result, null, 2)}`);
   logger.show();
 
-  return stripFences(result);
+  return result;
 }
 
 export async function getJustificationComment(

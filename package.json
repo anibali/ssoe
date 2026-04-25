@@ -1,5 +1,5 @@
 {
-  "name": "second-set-of-eyes",
+  "name": "ssoe",
   "displayName": "Second Set of Eyes (SSOE)",
   "description": "Semantic linter using a local LLM to catch logic bugs and subtle issues.",
   "version": "0.0.1",
