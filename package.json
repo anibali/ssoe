@@ -26,7 +26,7 @@
         },
         "ssoe.llmModel": {
           "type": "string",
-          "default": "unsloth/gemma-4-E2B-it-GGUF:Q4_K_M",
+          "default": "my-model",
           "description": "Model name to pass in requests. For llama.cpp this is usually ignored but must be non-empty."
         },
         "ssoe.maxTokens": {

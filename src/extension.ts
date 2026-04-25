@@ -6,6 +6,7 @@ import {
   applySurgicalFix,
   applyJustificationComment,
 } from "./codeActions";
+import * as logger from "./logger";
 
 const SUPPORTED_LANGUAGES = [
   "python",
@@ -18,6 +19,8 @@ const SUPPORTED_LANGUAGES = [
 let diagnosticCollection: vscode.DiagnosticCollection;
 
 export function activate(context: vscode.ExtensionContext) {
+  logger.init(context);
+
   diagnosticCollection =
     vscode.languages.createDiagnosticCollection(SSOE_SOURCE);
   context.subscriptions.push(diagnosticCollection);

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import OpenAI from "openai";
+import * as logger from "./logger";
 
 export interface LlmDiagnostic {
   line: number; // 1-indexed
@@ -15,13 +16,13 @@ function getClient(): { client: OpenAI; model: string; maxTokens: number } {
 
   const client = new OpenAI({
     baseURL: baseURL + "/v1",
-    apiKey: "not-needed", // llama.cpp doesn't require a key
+    apiKey: "not-needed",
   });
 
   return { client, model, maxTokens };
 }
 
-const SYSTEM_PROMPT = `You are an expert code reviewer acting as a semantic linter.
+const SCAN_SYSTEM_PROMPT = `You are an expert code reviewer acting as a semantic linter.
 Analyze the code and identify real problems: logic errors, bugs, missing returns,
 unreachable code, bad practices, and subtle issues that rule-based linters miss.
 Do NOT flag style preferences or things that are clearly intentional.
@@ -40,18 +41,26 @@ function stripFences(raw: string): string {
     .trim();
 }
 
+function divider(label: string): string {
+  return `\n${"─".repeat(50)}\n${label}\n${"─".repeat(50)}`;
+}
+
 export async function scanFile(
   code: string,
   languageId: string
 ): Promise<LlmDiagnostic[]> {
   const { client, model, maxTokens } = getClient();
 
+  logger.log(divider(`SCAN  [${languageId}]  ${new Date().toLocaleTimeString()}`));
+  logger.log(`model: ${model}  max_tokens: ${maxTokens}`);
+  logger.log(`\n--- file (${code.split("\n").length} lines) ---\n${code}`);
+
   const completion = await client.chat.completions.create({
     model,
     max_tokens: maxTokens,
     temperature: 0,
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: SCAN_SYSTEM_PROMPT },
       {
         role: "user",
         content: `Language: ${languageId}\n\n\`\`\`${languageId}\n${code}\n\`\`\``,
@@ -60,6 +69,9 @@ export async function scanFile(
   });
 
   const raw = completion.choices[0]?.message?.content ?? "";
+  logger.log(`\n--- raw response ---\n${raw}`);
+  logger.show();
+
   const cleaned = stripFences(raw);
 
   let parsed: unknown;
@@ -90,6 +102,7 @@ export async function scanFile(
     }
   }
 
+  logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
   return results;
 }
 
@@ -102,9 +115,12 @@ export async function getSurgicalFix(
 ): Promise<string> {
   const { client, model } = getClient();
 
+  logger.log(divider(`SURGICAL FIX  line ${lineNumber}  ${new Date().toLocaleTimeString()}`));
+  logger.log(`issue: ${diagnosticMessage}`);
+
   const completion = await client.chat.completions.create({
     model,
-    max_tokens: 256,
+    max_tokens: 2048,
     temperature: 0,
     messages: [
       {
@@ -126,7 +142,19 @@ ${code}
     ],
   });
 
-  return stripFences(completion.choices[0]?.message?.content ?? "");
+  logger.log(`\n--- completion object ---\n${JSON.stringify({
+    finish_reason: completion.choices[0]?.finish_reason,
+    message_role: completion.choices[0]?.message?.role,
+    content_type: typeof completion.choices[0]?.message?.content,
+    content_null: completion.choices[0]?.message?.content === null,
+    usage: completion.usage,
+  }, null, 2)}`);
+
+  const result = (completion.choices[0]?.message?.content ?? "");
+  logger.log(`\n--- response ---\n${result}`);
+  logger.show();
+
+  return stripFences(result);
 }
 
 export async function getJustificationComment(
@@ -136,6 +164,9 @@ export async function getJustificationComment(
   languageId: string
 ): Promise<string> {
   const { client, model } = getClient();
+
+  logger.log(divider(`JUSTIFY  line ${lineNumber}  ${new Date().toLocaleTimeString()}`));
+  logger.log(`issue: ${diagnosticMessage}`);
 
   const commentChar = ["python", "ruby", "shellscript"].includes(languageId)
     ? "#"
@@ -148,18 +179,23 @@ export async function getJustificationComment(
     messages: [
       {
         role: "system",
-        content: `You are writing a code comment to justify an intentional code pattern. Return ONLY the comment line starting with "${commentChar}". No explanation, no extra text.`,
+        content:
+          `You are writing a code comment to justify an intentional code pattern. ` +
+          `Return ONLY the comment line starting with "${commentChar}". No explanation, no extra text.`,
       },
       {
         role: "user",
-        content: `Language: ${languageId}
-Line ${lineNumber}: ${lineText}
-Flagged as: ${diagnosticMessage}
-
-Write a single-line comment explaining why this is intentional and should not be changed.`,
+        content:
+          `Language: ${languageId}\n` +
+          `Line ${lineNumber}: ${lineText}\n` +
+          `Flagged as: ${diagnosticMessage}\n\n` +
+          `Write a single-line comment explaining why this is intentional and should not be changed.`,
       },
     ],
   });
 
-  return (completion.choices[0]?.message?.content ?? "").trim();
+  const result = (completion.choices[0]?.message?.content ?? "").trim();
+  logger.log(`\n--- response ---\n${result}`);
+  logger.show();
+  return result;
 }
