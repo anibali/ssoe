@@ -7,7 +7,6 @@ import {
   applyToolBasedEdit,
 } from "./codeActions";
 import * as logger from "./logger";
-import { analysisCache } from "./analysisCache";
 
 const SUPPORTED_LANGUAGES = [
   "python",
@@ -26,14 +25,13 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.languages.createDiagnosticCollection(SSOE_SOURCE);
   context.subscriptions.push(diagnosticCollection);
 
-  // ── Clear diagnostics and chunk cache on file close/open (catches reload) ─────────
+  // ── Clear diagnostics on file close/open (catches reload) ─────────
   const closeListener = vscode.workspace.onDidCloseTextDocument((document) => {
     const filePath = document.uri.fsPath;
     if (diagnosticCollection.has(document.uri)) {
       logger.log(`Clearing diagnostics on close: ${filePath}`);
       diagnosticCollection.delete(document.uri);
     }
-    analysisCache.clear(filePath);
   });
 
   const openListener = vscode.workspace.onDidOpenTextDocument((document) => {
@@ -42,7 +40,6 @@ export function activate(context: vscode.ExtensionContext) {
       logger.log(`Clearing stale diagnostics on open: ${filePath}`);
       diagnosticCollection.delete(document.uri);
     }
-    analysisCache.clear(filePath);
   });
 
   // ── Command: scan the current file ────────────────────────────────────────
@@ -72,23 +69,8 @@ export function activate(context: vscode.ExtensionContext) {
             const diagnostics = await scanFile(editor.document);
 
             const vscodeDiagnostics = diagnostics.map((d) => {
-              // Use precise range from diagnostic mapper if available
-              let range: vscode.Range;
-
-              if (d.range) {
-                // Precise range from verbatim + context
-                range = d.range;
-              } else {
-                // Fallback: entire line (old behavior)
-                const lineIndex = Math.max(0, d.line - 1);
-                const line = editor.document.lineAt(
-                  Math.min(lineIndex, editor.document.lineCount - 1)
-                );
-                range = new vscode.Range(
-                  line.range.start,
-                  line.range.end
-                );
-              }
+              // Range is always present (only diagnostics with valid ranges are included)
+              const range = d.range;
 
               const severity =
                 d.severity === "error"
@@ -99,7 +81,7 @@ export function activate(context: vscode.ExtensionContext) {
 
               const diagnostic = new vscode.Diagnostic(
                 range,
-                d.message,
+                `${d.description}\n\n${d.failure_scenario}`,
                 severity
               );
               diagnostic.source = SSOE_SOURCE;

@@ -1,16 +1,16 @@
 import * as vscode from "vscode";
 import OpenAI from "openai";
 import * as logger from "./logger";
-import { chunkFile } from "./astChunker";
-import { LlmIssue, analysisCache } from "./analysisCache";
 import { resolveIssueLocation } from "./diagnosticMapper";
 import { EDIT_TOOL, parseEditToolCall, executeEdit, type EditToolInput } from "./tools/edit";
 
 export interface LlmDiagnostic {
-  line: number; // 1-indexed, fallback if range not available
+  context: string;           // Few surrounding lines
+  verbatim: string;           // Exact problematic substring
+  description: string;        // Short description
+  failure_scenario: string;   // "This will cause a problem when..."
   severity: "error" | "warning" | "info";
-  message: string;
-  range?: vscode.Range; // Precise range from diagnostic mapper
+  range: vscode.Range;       // Precise range from diagnostic mapper
 }
 
 function getClient(): { client: OpenAI; model: string; maxTokens: number } {
@@ -41,41 +41,18 @@ Think about your list of issues to check that none have such an associated comme
 The user's time is precious, so do not be overly pedantic.
 It is often correct to return no issues, so do that when appropriate.
 
-Return ONLY a valid JSON array. Each element must be:
-{"line": <1-indexed integer>, "severity": "error"|"warning"|"info", "message": "<concise one-line description>"}
+Respond with a JSON array only - no preamble, no markdown fences.
+Each element must be:
+{
+  "context": "<a few lines of surrounding code to uniquely locate the issue>",
+  "verbatim": "<the exact problematic text, must appear verbatim inside context>",
+  "description": "<short description of the issue>",
+  "failure_scenario": "<concrete completion of 'This will cause a problem when...'>",
+  "severity": "error" | "warning" | "info"
+}
 
 If there are no issues, return an empty array: []
 No markdown fences, no prose, no explanation - just the raw JSON array.`;
-
-const ANALYZE_CHUNK_SYSTEM_PROMPT = `You are a senior software engineer reviewing code for logic errors.
-Your goal is to catch bugs that automated tools like linters and type checkers would miss.
-
-You will be given:
-- A module context section (imports, type aliases, constants) - do not report issues here
-- A single code unit (function, method, class, or similar) to analyze
-
-Rules:
-- Only report issues you are confident represent real bugs or clearly incorrect logic
-- Do NOT report: style issues, naming conventions, missing docstrings, type annotation suggestions, or anything a linter or type checker would catch
-- An empty list is the correct response for clean code - do not invent issues to be thorough
-- Do not report the same class of issue more than once per code unit
-
-For each issue you find, you must be able to complete the sentence "This will cause a problem when..."
-If you cannot, do not report it.
-
-Respond with a JSON object only - no preamble, no markdown fences.
-Schema:
-{
-  "issues": [
-    {
-      "context": "<a few lines of surrounding code to uniquely locate the issue>",
-      "verbatim": "<the exact problematic text, must appear verbatim inside context>",
-      "description": "<short description of the issue>",
-      "failure_scenario": "<concrete completion of 'This will cause a problem when...'>",
-      "severity": "error" | "warning" | "info"
-    }
-  ]
-}`;
 
 const TOOL_EDIT_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file tool to apply fixes.
 Be precise: keep oldText minimal but unique.
@@ -112,72 +89,7 @@ export async function scanFile(
   const code = document.getText();
   const languageId = document.languageId;
 
-  // Use chunking-based analysis with analyzeChunk()
-  const chunkResult = await chunkFile(document);
-
-  if (!chunkResult) {
-    logger.log("chunkFile returned null, falling back to whole-file analysis");
-    // Fall through to old behavior below
-  } else {
-    logger.log("─── CHUNKED ANALYSIS ─────────────────────────");
-    logger.log(`Module context (${chunkResult.moduleContext.split("\n").length} lines)`);
-    logger.log(`Chunks to analyze: ${chunkResult.chunks.length}`);
-
-    const allIssues: LlmIssue[] = [];
-    const filePath = document.uri.fsPath;
-    const validHashes = new Set<string>();
-
-    for (const chunk of chunkResult.chunks) {
-      logger.log(`\n--- Analyzing chunk: ${chunk.type} ${chunk.name || "unnamed"} ---`);
-
-      try {
-        // Check cache first
-        let issues = analysisCache.get(filePath, chunk.hash);
-
-        if (issues) {
-          logger.log(`  (from cache)`);
-        } else {
-          // Not in cache, analyze
-          issues = await analyzeChunk(chunkResult.moduleContext, chunk.text, languageId);
-          // Store in cache
-          analysisCache.set(filePath, chunk.hash, issues);
-          logger.log(`  (analyzed and cached)`);
-        }
-
-        allIssues.push(...issues);
-        validHashes.add(chunk.hash); // Track valid hash
-      } catch (err) {
-        logger.log(`Error analyzing chunk: ${err}`);
-      }
-    }
-
-    logger.log(`\n--- Total issues found: ${allIssues.length} ---`);
-    logger.log("─── END CHUNKED ANALYSIS ───────\n");
-
-    // Convert LlmIssue to LlmDiagnostic using diagnostic mapper
-    const diagnostics: LlmDiagnostic[] = [];
-
-    for (const issue of allIssues) {
-      const range = resolveIssueLocation(code, issue);
-
-      if (range) {
-        diagnostics.push({
-          line: range.start.line + 1, // 1-indexed fallback
-          severity: issue.severity,
-          message: `${issue.description}\n\n${issue.failure_scenario}`,
-          range: range, // Precise range from diagnostic mapper
-        });
-      }
-    }
-
-    // Remove stale cache entries for this file
-    analysisCache.removeStaleEntries(filePath, validHashes);
-
-    return diagnostics;
-  }
-
-  // Fallback: old whole-file analysis (will be removed once diagnosticMapper is done)
-  logger.log(divider(`SCAN (fallback)  [${languageId}]  ${new Date().toLocaleTimeString()}`));
+  logger.log(divider(`SCAN  [${languageId}]  ${new Date().toLocaleTimeString()}`));
   logger.log(`model: ${model}  max_tokens: ${maxTokens}`);
   logger.log(`\n--- file (${code.split("\n").length} lines) ---\n${code}`);
 
@@ -189,7 +101,7 @@ export async function scanFile(
       { role: "system", content: SCAN_SYSTEM_PROMPT },
       {
         role: "user",
-        content: `Language: ${languageId}\n\n\`\`\`${languageId}\n${code}\n\`\`\``,
+        content: `Language: ${languageId}\n\n\`\`\`${languageId}\n${code}\n\`\`\` `,
       },
     ],
   });
@@ -221,97 +133,37 @@ export async function scanFile(
     if (
       typeof item === "object" &&
       item !== null &&
-      typeof (item as Record<string, unknown>).line === "number" &&
-      typeof (item as Record<string, unknown>).message === "string"
-    ) {
-      const sev = (item as Record<string, unknown>).severity;
-      results.push({
-        line: (item as Record<string, unknown>).line as number,
-        severity: sev === "error" ? "error" : sev === "info" ? "info" : "warning",
-        message: (item as Record<string, unknown>).message as string,
-      });
-    }
-  }
-
-  logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
-  return results;
-}
-
-export async function analyzeChunk(
-  moduleContext: string,
-  codeUnit: string,
-  languageId: string
-): Promise<LlmIssue[]> {
-  const { client, model, maxTokens } = getClient();
-
-  logger.log(divider(`ANALYZE CHUNK  [${languageId}]  ${new Date().toLocaleTimeString()}`));
-  logger.log(`model: ${model}  max_tokens: ${maxTokens}`);
-  logger.log(`\n--- module context (${moduleContext.split("\n").length} lines) ---\n${moduleContext}`);
-  logger.log(`\n--- code unit (${codeUnit.split("\n").length} lines) ---\n${codeUnit}`);
-
-  const completion = await client.chat.completions.create({
-    model,
-    max_tokens: maxTokens,
-    temperature: 0,
-    messages: [
-      { role: "system", content: ANALYZE_CHUNK_SYSTEM_PROMPT },
-      { role: "user", content: `[module context - do not report issues here]\n${moduleContext}` },
-      { role: "user", content: `[analyze this]\n${codeUnit}` },
-    ],
-  });
-
-  const finishReason = completion.choices[0]?.finish_reason;
-  if (finishReason && finishReason !== "stop") {
-    logger.log(`\n⚠️  WARNING: Model finish_reason: "${finishReason}"`);
-  }
-
-  const raw = completion.choices[0]?.message?.content ?? "";
-  logger.log(`\n--- raw response ---\n${raw}`);
-
-  const cleaned = stripFences(raw);
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    throw new Error(`LLM returned non-JSON: ${cleaned.slice(0, 200)}`);
-  }
-
-  if (typeof parsed !== "object" || parsed === null || !("issues" in parsed)) {
-    throw new Error("LLM response missing 'issues' array");
-  }
-
-  const issues = (parsed as { issues: unknown }).issues;
-  if (!Array.isArray(issues)) {
-    throw new Error("LLM response 'issues' is not an array");
-  }
-
-  const results: LlmIssue[] = [];
-  for (const item of issues) {
-    if (
-      typeof item === "object" &&
-      item !== null &&
       typeof (item as Record<string, unknown>).context === "string" &&
       typeof (item as Record<string, unknown>).verbatim === "string" &&
       typeof (item as Record<string, unknown>).description === "string" &&
       typeof (item as Record<string, unknown>).failure_scenario === "string"
     ) {
       const sev = (item as Record<string, unknown>).severity;
-      const severity = sev === "error" ? "error" : sev === "warning" ? "warning" : "info";
+      const description = (item as Record<string, unknown>).description as string;
+      const failure_scenario = (item as Record<string, unknown>).failure_scenario as string;
+      const context = (item as Record<string, unknown>).context as string;
+      const verbatim = (item as Record<string, unknown>).verbatim as string;
 
-      results.push({
-        context: (item as Record<string, unknown>).context as string,
-        verbatim: (item as Record<string, unknown>).verbatim as string,
-        description: (item as Record<string, unknown>).description as string,
-        failure_scenario: (item as Record<string, unknown>).failure_scenario as string,
-        severity,
-      });
+      // Resolve precise range using diagnostic mapper
+      const range = resolveIssueLocation(code, { context, verbatim });
+
+      if (range) {
+        const diagnostic: LlmDiagnostic = {
+          context,
+          verbatim,
+          description,
+          failure_scenario,
+          severity: sev === "error" ? "error" : sev === "info" ? "info" : "warning",
+          range,
+        };
+        results.push(diagnostic);
+      } else {
+        logger.log(`Warning: Could not resolve location for issue: ${description}`);
+      }
     }
   }
 
-  logger.log(`\n--- parsed issues ---\n${JSON.stringify(results, null, 2)}`);
-  logger.show();
-
+  logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
   return results;
 }
 
@@ -475,6 +327,7 @@ export async function getToolBasedEdit(
     expectedVersion,
   });
 }
+
 export async function getJustificationComment(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic,
