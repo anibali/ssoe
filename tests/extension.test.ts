@@ -469,4 +469,69 @@ describe('processDocumentChange', () => {
     expect(diagnostics![0].range.start.character).toBe(11); // 10 + 1
     expect(diagnostics![0].range.end.character).toBe(21); // 20 + 1
   });
+
+  test('should remove diagnostic when text is added within it (insertion)', () => {
+    // Diagnostic at line 5, characters 0-20
+    const diagnostic = new vscode.Diagnostic(
+      new vscode.Range(5, 0, 5, 20),
+      'Issue in this area',
+      vscode.DiagnosticSeverity.Warning
+    );
+    diagnostic.source = SSOE_SOURCE;
+
+    mockDiagnosticCollection.set(mockUri, [diagnostic]);
+
+    // Insert text WITHIN the diagnostic: at position (5, 10), adding 'INSERTED'
+    // This is an insertion, so rangeLength = 0 and range start === end
+    const event = {
+      document: mockDocument,
+      contentChanges: [
+        {
+          range: new vscode.Range(5, 10, 5, 10),
+          rangeLength: 0,
+          text: 'INSERTED', // Insertion within diagnostic
+        },
+      ],
+    } as unknown as vscode.TextDocumentChangeEvent;
+
+    processDocumentChange(event, mockDiagnosticCollection);
+
+    // BUG: Currently this test will fail because the overlap check
+    // requires the intersection to have actual length. When inserting
+    // within a diagnostic, the intersection is zero-length (just a point),
+    // so the diagnostic is NOT removed when it should be.
+    // Expected: diagnostic should be removed
+    const diagnostics = mockDiagnosticCollection.get(mockUri);
+    expect(diagnostics).toEqual([]);
+  });
+
+  test('should remove diagnostic when text is added at diagnostic start', () => {
+    // Diagnostic at line 5, characters 10-20
+    const diagnostic = new vscode.Diagnostic(
+      new vscode.Range(5, 10, 5, 20),
+      'Issue here',
+      vscode.DiagnosticSeverity.Warning
+    );
+    diagnostic.source = SSOE_SOURCE;
+
+    mockDiagnosticCollection.set(mockUri, [diagnostic]);
+
+    // Insert text at the start of the diagnostic (5, 10)
+    const event = {
+      document: mockDocument,
+      contentChanges: [
+        {
+          range: new vscode.Range(5, 10, 5, 10),
+          rangeLength: 0,
+          text: 'INSERTED',
+        },
+      ],
+    } as unknown as vscode.TextDocumentChangeEvent;
+
+    processDocumentChange(event, mockDiagnosticCollection);
+
+    // Diagnostic should be removed since text was added at its start
+    const diagnostics = mockDiagnosticCollection.get(mockUri);
+    expect(diagnostics).toEqual([]);
+  });
 });

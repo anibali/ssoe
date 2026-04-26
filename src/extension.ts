@@ -201,13 +201,21 @@ export function processDocumentChange(
       const diagStart = d.range.start;
       const diagEnd = d.range.end;
 
-      // Check if diagnostic overlaps with the edit region
+      // Check if diagnostic is affected by the edit region
       // Note: intersection() may return a zero-length range when ranges just touch at a point.
-      // We need to ensure the intersection has actual length (start !== end).
+      // We need to handle two cases:
+      // 1. Edit has length and overlaps with diagnostic (existing behavior)
+      // 2. Edit is an insertion (zero-length) and insertion point is within diagnostic
       const intersection = d.range.intersection(editRange);
-      const overlaps = intersection !== undefined &&
+      const isInsertion = editRange.start.line === editRange.end.line &&
+                          editRange.start.character === editRange.end.character;
+      const overlaps = intersection !== undefined && (
+          // Edit overlaps with diagnostic and has length
           (intersection.start.line !== intersection.end.line ||
-           intersection.start.character !== intersection.end.character);
+           intersection.start.character !== intersection.end.character) ||
+          // Edit is an insertion within the diagnostic
+          (isInsertion && d.range.contains(editRange.start))
+      );
 
       if (overlaps) {
         logger.log(`Removing diagnostic at line ${diagStart.line + 1} - overlaps with edit`);
