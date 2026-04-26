@@ -73,13 +73,7 @@ Schema:
       "severity": "error" | "warning" | "info"
     }
   ]
-}
-
-[module context - do not report issues here]
-{module_context}
-
-[analyze this]
-{code_unit}`;
+}`;
 
 function stripFences(raw: string): string {
   return raw
@@ -237,16 +231,14 @@ export async function analyzeChunk(
   logger.log(`\n--- module context (${moduleContext.split("\n").length} lines) ---\n${moduleContext}`);
   logger.log(`\n--- code unit (${codeUnit.split("\n").length} lines) ---\n${codeUnit}`);
 
-  const userMessage = ANALYZE_CHUNK_SYSTEM_PROMPT
-    .replace("{module_context}", moduleContext)
-    .replace("{code_unit}", codeUnit);
-
   const completion = await client.chat.completions.create({
     model,
     max_tokens: maxTokens,
     temperature: 0,
     messages: [
-      { role: "user", content: userMessage },
+      { role: "system", content: ANALYZE_CHUNK_SYSTEM_PROMPT },
+      { role: "user", content: `[module context - do not report issues here]\n${moduleContext}` },
+      { role: "user", content: `[analyze this]\n${codeUnit}` },
     ],
   });
 
