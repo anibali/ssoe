@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import OpenAI from "openai";
 import * as logger from "./logger";
-import { resolveIssueLocation } from "./diagnosticMapper";
+import { resolveIssueLocation, type ResolveIssueResult } from "./diagnosticMapper";
 import { EDIT_TOOL, parseEditToolCall, executeEdit, type EditToolInput } from "./tools/edit";
 
 export interface LlmDiagnostic {
@@ -32,6 +32,8 @@ function getClient(): { client: OpenAI; model: string; maxTokens: number } {
 const SCAN_SYSTEM_PROMPT = `You are an expert code reviewer acting as a semantic linter.
 Identify real problems: logic errors, bugs, missing returns, unreachable code,
 and subtle issues that rule-based linters miss. Do NOT flag style or clearly intentional code.
+Do NOT flag things that rule-based linters would catch, such as unused variables,
+type checking issues, and so forth.
 
 CRITICAL: Comments and docstrings are gold-standard indicators of intended behaviour.
 If code has an associated comment describing its purpose, NEVER flag it as an issue.
@@ -87,83 +89,135 @@ export async function scanFile(
   const { client, model, maxTokens } = getClient();
   const code = document.getText();
   const languageId = document.languageId;
+  const MAX_RETRIES = 3;
 
   logger.log(divider(`SCAN  [${languageId}]  ${new Date().toLocaleTimeString()}`));
   logger.log(`model: ${model}  max_tokens: ${maxTokens}`);
   logger.log(`\n--- file (${code.split("\n").length} lines) ---\n${code}`);
 
-  const completion = await client.chat.completions.create({
-    model,
-    max_tokens: maxTokens,
-    temperature: 0,
-    messages: [
-      { role: "system", content: SCAN_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: `Language: ${languageId}\n\n\`\`\`${languageId}\n${code}\n\`\`\` `,
-      },
-    ],
-  });
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: "system", content: SCAN_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: `Language: ${languageId}\n\n\`\`\`${languageId}\n${code}\n\`\`\` `,
+    },
+  ];
 
-  const finishReason = completion.choices[0]?.finish_reason;
-  if (finishReason && finishReason !== "stop") {
-    logger.log(`\n⚠️  WARNING: Model finish_reason: "${finishReason}"`);
-  }
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    logger.log(`\n--- scan attempt ${attempt} ---`);
 
-  const raw = completion.choices[0]?.message?.content ?? "";
-  logger.log(`\n--- raw response ---\n${raw}`);
-  logger.show();
+    const completion = await client.chat.completions.create({
+      model,
+      max_tokens: maxTokens,
+      temperature: 0,
+      messages,
+    });
 
-  const cleaned = stripFences(raw);
+    const finishReason = completion.choices[0]?.finish_reason;
+    if (finishReason && finishReason !== "stop" && finishReason !== "tool_calls") {
+      logger.log(`\n⚠️  WARNING: Model finish_reason: "${finishReason}"`);
+    }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    throw new Error(`LLM returned non-JSON: ${cleaned.slice(0, 200)}`);
-  }
+    const raw = completion.choices[0]?.message?.content ?? "";
+    logger.log(`\n--- raw response ---\n${raw}`);
+    logger.show();
 
-  if (!Array.isArray(parsed)) {
-    throw new Error("LLM response was not a JSON array");
-  }
+    const cleaned = stripFences(raw);
 
-  const results: LlmDiagnostic[] = [];
-  for (const item of parsed) {
-    if (
-      typeof item === "object" &&
-      item !== null &&
-      typeof (item as Record<string, unknown>).context === "string" &&
-      typeof (item as Record<string, unknown>).verbatim === "string" &&
-      typeof (item as Record<string, unknown>).description === "string" &&
-      typeof (item as Record<string, unknown>).failure_scenario === "string"
-    ) {
-      const sev = (item as Record<string, unknown>).severity;
-      const description = (item as Record<string, unknown>).description as string;
-      const failure_scenario = (item as Record<string, unknown>).failure_scenario as string;
-      const context = (item as Record<string, unknown>).context as string;
-      const verbatim = (item as Record<string, unknown>).verbatim as string;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`LLM returned non-JSON: ${cleaned.slice(0, 200)}`);
+      }
+      logger.log(`\n⚠️  LLM returned non-JSON, retrying...`);
+      messages.push({ role: "user", content: "ERROR: Your response was not valid JSON. Please return a JSON array of diagnostics as specified." });
+      continue;
+    }
 
-      // Resolve precise range using diagnostic mapper
-      const range = resolveIssueLocation(code, { context, verbatim });
+    if (!Array.isArray(parsed)) {
+      if (attempt === MAX_RETRIES) {
+        throw new Error("LLM response was not a JSON array");
+      }
+      logger.log(`\n⚠️  LLM response was not a JSON array, retrying...`);
+      messages.push({ role: "user", content: "ERROR: Your response must be a JSON array of diagnostics. Please try again." });
+      continue;
+    }
 
-      if (range) {
-        const diagnostic: LlmDiagnostic = {
-          context,
-          verbatim,
-          description,
-          failure_scenario,
-          severity: sev === "error" ? "error" : sev === "info" ? "info" : "warning",
-          range,
-        };
-        results.push(diagnostic);
+    const results: LlmDiagnostic[] = [];
+    const invalidDiagnostics: Array<{ description: string; context: string; verbatim: string; error: string }> = [];
+
+    for (const item of parsed) {
+      if (
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as Record<string, unknown>).context === "string" &&
+        typeof (item as Record<string, unknown>).verbatim === "string" &&
+        typeof (item as Record<string, unknown>).description === "string" &&
+        typeof (item as Record<string, unknown>).failure_scenario === "string"
+      ) {
+        const sev = (item as Record<string, unknown>).severity;
+        const description = (item as Record<string, unknown>).description as string;
+        const failure_scenario = (item as Record<string, unknown>).failure_scenario as string;
+        const context = (item as Record<string, unknown>).context as string;
+        const verbatim = (item as Record<string, unknown>).verbatim as string;
+
+        // Resolve precise range using diagnostic mapper
+        const result: ResolveIssueResult = resolveIssueLocation(code, { context, verbatim });
+
+        if (result.success) {
+          const diagnostic: LlmDiagnostic = {
+            context,
+            verbatim,
+            description,
+            failure_scenario,
+            severity: sev === "error" ? "error" : sev === "info" ? "info" : "warning",
+            range: result.range,
+          };
+          results.push(diagnostic);
+        } else {
+          logger.log(`Warning: Could not resolve location for issue: ${description} (${result.error})`);
+          invalidDiagnostics.push({ description, context, verbatim, error: result.error });
+        }
       } else {
-        logger.log(`Warning: Could not resolve location for issue: ${description}`);
+        logger.log(`Warning: Invalid diagnostic format in response`);
       }
     }
+
+    // If all diagnostics are valid, return results
+    if (invalidDiagnostics.length === 0 && results.length > 0) {
+      logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
+      return results;
+    }
+
+    // If we have invalid diagnostics and retries left, send feedback
+    if (invalidDiagnostics.length > 0 && attempt < MAX_RETRIES) {
+      const invalidList = invalidDiagnostics
+        .map(d => `- Description: ${d.description}\n  Context: ${d.context}\n  Verbatim: ${d.verbatim}\n  Error: ${d.error}`)
+        .join("\n");
+      const feedback = `ERROR: Some diagnostics had issues with their context/verbatim fields:\n${invalidList}\n\nPlease regenerate the FULL list of diagnostics, ensuring that:
+1. The "context" field exactly matches the surrounding code in the file (problem: "context not found" means it's not present)
+2. The "verbatim" field exactly matches the problematic text within the context (problem: "verbatim not found" means it's not within the context)
+Return the complete JSON array again with corrected fields.`;
+      logger.log(`\n⚠️  Invalid diagnostics found, retrying: ${invalidDiagnostics.length} issues`);
+      messages.push({ role: "user", content: feedback });
+      continue;
+    }
+
+    // If we've exhausted retries, return valid results (if any)
+    if (invalidDiagnostics.length > 0) {
+      const invalidCount = invalidDiagnostics.length;
+      const message = `SSOE: ${invalidCount} diagnostic${invalidCount === 1 ? '' : 's'} could not be mapped to file locations after ${MAX_RETRIES} attempts.`;
+      logger.log(`\n⚠️  ${message}`);
+      vscode.window.showErrorMessage(message);
+    }
+    logger.log(`\n--- parsed diagnostics (after ${MAX_RETRIES} attempts) ---\n${JSON.stringify(results, null, 2)}`);
+    return results;
   }
 
-  logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
-  return results;
+  // Fallback (shouldn't reach here)
+  return [];
 }
 
 interface ToolEditOptions {

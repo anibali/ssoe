@@ -1,25 +1,31 @@
 import * as vscode from "vscode";
 import * as logger from "./logger";
 
+/** Result type for resolveIssueLocation with detailed error info */
+export type ResolveIssueResult =
+  | { success: true; range: vscode.Range }
+  | { success: false; error: string };
+
 /**
  * Resolve the precise location of an issue within the file text.
  * Uses the context and verbatim strings to find exact character positions.
  *
  * @param fileText The full text of the file
  * @param diagnostic The diagnostic with context and verbatim fields
- * @returns vscode.Range with precise location, or undefined if not found
+ * @returns ResolveIssueResult with range or error details
  */
 export function resolveIssueLocation(
   fileText: string,
   diagnostic: { context: string; verbatim: string }
-): vscode.Range | undefined {
+): ResolveIssueResult {
   const { context, verbatim } = diagnostic;
 
   // Find the context in the file
   const contextIndex = fileText.indexOf(context);
   if (contextIndex === -1) {
-    logger.log(`DiagnosticMapper: context not found in file`);
-    return undefined;
+    const error = "context not found in file";
+    logger.log(`DiagnosticMapper: ${error}`);
+    return { success: false, error };
   }
 
   // Find the verbatim text within the context region
@@ -27,15 +33,16 @@ export function resolveIssueLocation(
   const verbatimIndex = fileText.indexOf(verbatim, contextIndex);
 
   if (verbatimIndex === -1 || verbatimIndex >= contextEndIndex) {
-    logger.log(`DiagnosticMapper: verbatim not found within context`);
-    return undefined;
+    const error = "verbatim not found within context";
+    logger.log(`DiagnosticMapper: ${error}`);
+    return { success: false, error };
   }
 
   // Convert character indices to line/character positions
   const startPos = indexToPosition(fileText, verbatimIndex);
   const endPos = indexToPosition(fileText, verbatimIndex + verbatim.length);
 
-  return new vscode.Range(startPos, endPos);
+  return { success: true, range: new vscode.Range(startPos, endPos) };
 }
 
 /**
