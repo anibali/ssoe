@@ -266,7 +266,9 @@ export function processDocumentChange(
   // Update diagnostics if anything changed
   if (changed) {
     diagCollection.set(uri, adjustedDiagnostics);
-    logger.log(`Diagnostics adjusted after edit: ${currentDiagnostics.length} → ${adjustedDiagnostics.length}`);
+    if (adjustedDiagnostics.length !== currentDiagnostics.length) {
+      logger.log(`Diagnostics adjusted after edit: ${currentDiagnostics.length} → ${adjustedDiagnostics.length}`);
+    }
   }
 }
 
