@@ -372,11 +372,20 @@ export async function getCodeFix(
   const code = document.getText();
   const filePath = document.uri.fsPath;
   const languageId = document.languageId;
-  const lineNumber = diagnostic.range.start.line + 1; // 1-indexed
+  const startLine = diagnostic.range.start.line + 1; // 1-indexed
+  const endLine = diagnostic.range.end.line + 1; // 1-indexed
 
   return executeWithToolRetry({
     systemPrompt: FIX_CODE_SYSTEM_PROMPT,
-    userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nIssue to fix: ${diagnostic.message}\nLine number: ${lineNumber}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
+    userMessage:
+      `=== DIAGNOSTIC DETAILS ===\n` +
+      `Language: ${languageId}\n` +
+      `File: ${filePath}\n` +
+      `Issue to fix: ${diagnostic.message}\n` +
+      `Affected line range: ${startLine} to ${endLine} (1-indexed)\n\n` +
+      `=== FULL SOURCE CODE ===\n` +
+      `\`\`\`${languageId}\n${code}\n\`\`\`\n\n` +
+      `Reminder: Use the edit_file tool to apply fixes. Keep oldText minimal but unique; include all related edits in one tool call.`,
     logLabel: `FIX CODE  ${filePath}`,
     logContext: `issue: ${diagnostic.message}`,
     document,
@@ -392,11 +401,20 @@ export async function getIntentDoc(
   const code = document.getText();
   const filePath = document.uri.fsPath;
   const languageId = document.languageId;
-  const lineNumber = diagnostic.range.start.line + 1; // 1-indexed
+  const startLine = diagnostic.range.start.line + 1; // 1-indexed
+  const endLine = diagnostic.range.end.line + 1; // 1-indexed
 
   return executeWithToolRetry({
     systemPrompt: DOCUMENT_INTENTIONAL_SYSTEM_PROMPT,
-    userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nFlagged as: ${diagnostic.message}\nLine number: ${lineNumber}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
+    userMessage:
+      `=== DIAGNOSTIC DETAILS ===\n` +
+      `Language: ${languageId}\n` +
+      `File: ${filePath}\n` +
+      `Flagged as intentional: ${diagnostic.message}\n` +
+      `Affected line range: ${startLine} to ${endLine} (1-indexed)\n\n` +
+      `=== FULL SOURCE CODE ===\n` +
+      `\`\`\`${languageId}\n${code}\n\`\`\`\n\n` +
+      `Reminder: The flagged issue is intentional. Add/edit comments/docstrings to explain this, without modifying functional code. Use the edit_file tool.`,
     logLabel: `DOCUMENT INTENTIONAL  ${filePath}`,
     logContext: `issue: ${diagnostic.message}`,
     document,
