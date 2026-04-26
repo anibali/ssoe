@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import OpenAI from "openai";
 import * as logger from "./logger";
 import { chunkFile } from "./astChunker";
+import { LlmIssue } from "./analysisCache";
 import { EDIT_TOOL, parseEditToolCall, executeEdit, type EditToolInput } from "./tools/edit";
 
 export interface LlmDiagnostic {
@@ -42,6 +43,42 @@ Return ONLY a valid JSON array. Each element must be:
 If there are no issues, return an empty array: []
 No markdown fences, no prose, no explanation — just the raw JSON array.`;
 
+const ANALYZE_CHUNK_SYSTEM_PROMPT = `You are a senior software engineer reviewing code for logic errors.
+Your goal is to catch bugs that automated tools like linters and type checkers would miss.
+
+You will be given:
+- A module context section (imports, type aliases, constants) — do not report issues here
+- A single code unit (function, method, class, or similar) to analyze
+
+Rules:
+- Only report issues you are confident represent real bugs or clearly incorrect logic
+- Do NOT report: style issues, naming conventions, missing docstrings, type annotation suggestions, or anything a linter or type checker would catch
+- An empty list is the correct response for clean code — do not invent issues to be thorough
+- Do not report the same class of issue more than once per code unit
+
+For each issue you find, you must be able to complete the sentence "This will cause a problem when..."
+If you cannot, do not report it.
+
+Respond with a JSON object only — no preamble, no markdown fences.
+Schema:
+{
+  "issues": [
+    {
+      "context": "<a few lines of surrounding code to uniquely locate the issue>",
+      "verbatim": "<the exact problematic text, must appear verbatim inside context>",
+      "description": "<short description of the issue>",
+      "failure_scenario": "<concrete completion of 'This will cause a problem when...'>",
+      "severity": "error" | "warning" | "info"
+    }
+  ]
+}
+
+[module context - do not report issues here]
+{module_context}
+
+[analyze this]
+{code_unit}`;
+
 function stripFences(raw: string): string {
   return raw
     .trim()
@@ -61,28 +98,44 @@ export async function scanFile(
   const code = document.getText();
   const languageId = document.languageId;
 
-  // Test chunking - log chunks at start of scan
-  try {
-    const chunkResult = await chunkFile(document);
-    if (chunkResult) {
-      logger.log("─── CHUNKING TEST ─────────────────────────");
-      logger.log(`Module context (${chunkResult.moduleContext.split("\n").length} lines):`);
-      logger.log(chunkResult.moduleContext || "(empty)");
-      logger.log(`\nChunks found: ${chunkResult.chunks.length}`);
-      chunkResult.chunks.forEach((chunk, i) => {
-        logger.log(`\n[Chunk ${i + 1}] ${chunk.type}${chunk.name ? " " + chunk.name : ""} (lines ${chunk.range.start.line + 1}-${chunk.range.end.line + 1})`);
-        logger.log(`Hash: ${chunk.hash}`);
-        logger.log(chunk.text.slice(0, 200) + (chunk.text.length > 200 ? "..." : ""));
-      });
-      logger.log("─── END CHUNKING TEST ───────\n");
-    } else {
-      logger.log("─── CHUNKING TEST: chunkFile returned null ───\n");
+  // Use chunking-based analysis with analyzeChunk()
+  const chunkResult = await chunkFile(document);
+
+  if (!chunkResult) {
+    logger.log("chunkFile returned null, falling back to whole-file analysis");
+    // Fall through to old behavior below
+  } else {
+    logger.log("─── CHUNKED ANALYSIS ─────────────────────────");
+    logger.log(`Module context (${chunkResult.moduleContext.split("\n").length} lines)`);
+    logger.log(`Chunks to analyze: ${chunkResult.chunks.length}`);
+
+    const allIssues: import("./analysisCache").LlmIssue[] = [];
+
+    for (const chunk of chunkResult.chunks) {
+      logger.log(`\n--- Analyzing chunk: ${chunk.type} ${chunk.name || "unnamed"} ---`);
+      try {
+        const issues = await analyzeChunk(chunkResult.moduleContext, chunk.text, languageId);
+        // Add chunk location info to issues
+        const issuesWithLocation = issues.map(issue => ({
+          ...issue,
+          chunkInfo: { hash: chunk.hash, type: chunk.type, name: chunk.name }
+        }));
+        allIssues.push(...issuesWithLocation);
+      } catch (err) {
+        logger.log(`Error analyzing chunk: ${err}`);
+      }
     }
-  } catch (chunkError) {
-    logger.log(`─── CHUNKING TEST ERROR: ${chunkError} ───\n`);
+
+    logger.log(`\n--- Total issues found: ${allIssues.length} ---`);
+    logger.log("─── END CHUNKED ANALYSIS ───────\n");
+
+    // Convert LlmIssue to LlmDiagnostic (need to resolve locations)
+    // For now, return empty - we need diagnosticMapper to resolve verbatim/context to ranges
+    return [];
   }
 
-  logger.log(divider(`SCAN  [${languageId}]  ${new Date().toLocaleTimeString()}`));
+  // Fallback: old whole-file analysis (will be removed once diagnosticMapper is done)
+  logger.log(divider(`SCAN (fallback)  [${languageId}]  ${new Date().toLocaleTimeString()}`));
   logger.log(`model: ${model}  max_tokens: ${maxTokens}`);
   logger.log(`\n--- file (${code.split("\n").length} lines) ---\n${code}`);
 
@@ -139,6 +192,86 @@ export async function scanFile(
   }
 
   logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
+  return results;
+}
+
+export async function analyzeChunk(
+  moduleContext: string,
+  codeUnit: string,
+  languageId: string
+): Promise<LlmIssue[]> {
+  const { client, model, maxTokens } = getClient();
+
+  logger.log(divider(`ANALYZE CHUNK  [${languageId}]  ${new Date().toLocaleTimeString()}`));
+  logger.log(`model: ${model}  max_tokens: ${maxTokens}`);
+  logger.log(`\n--- module context (${moduleContext.split("\n").length} lines) ---\n${moduleContext}`);
+  logger.log(`\n--- code unit (${codeUnit.split("\n").length} lines) ---\n${codeUnit}`);
+
+  const userMessage = ANALYZE_CHUNK_SYSTEM_PROMPT
+    .replace("{module_context}", moduleContext)
+    .replace("{code_unit}", codeUnit);
+
+  const completion = await client.chat.completions.create({
+    model,
+    max_tokens: maxTokens,
+    temperature: 0,
+    messages: [
+      { role: "user", content: userMessage },
+    ],
+  });
+
+  const finishReason = completion.choices[0]?.finish_reason;
+  if (finishReason && finishReason !== "stop") {
+    logger.log(`\n⚠️  WARNING: Model finish_reason: "${finishReason}"`);
+  }
+
+  const raw = completion.choices[0]?.message?.content ?? "";
+  logger.log(`\n--- raw response ---\n${raw}`);
+
+  const cleaned = stripFences(raw);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new Error(`LLM returned non-JSON: ${cleaned.slice(0, 200)}`);
+  }
+
+  if (typeof parsed !== "object" || parsed === null || !("issues" in parsed)) {
+    throw new Error("LLM response missing 'issues' array");
+  }
+
+  const issues = (parsed as { issues: unknown }).issues;
+  if (!Array.isArray(issues)) {
+    throw new Error("LLM response 'issues' is not an array");
+  }
+
+  const results: LlmIssue[] = [];
+  for (const item of issues) {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>).context === "string" &&
+      typeof (item as Record<string, unknown>).verbatim === "string" &&
+      typeof (item as Record<string, unknown>).description === "string" &&
+      typeof (item as Record<string, unknown>).failure_scenario === "string"
+    ) {
+      const sev = (item as Record<string, unknown>).severity;
+      const severity = sev === "error" ? "error" : sev === "warning" ? "warning" : "info";
+
+      results.push({
+        context: (item as Record<string, unknown>).context as string,
+        verbatim: (item as Record<string, unknown>).verbatim as string,
+        description: (item as Record<string, unknown>).description as string,
+        failure_scenario: (item as Record<string, unknown>).failure_scenario as string,
+        severity,
+      });
+    }
+  }
+
+  logger.log(`\n--- parsed issues ---\n${JSON.stringify(results, null, 2)}`);
+  logger.show();
+
   return results;
 }
 

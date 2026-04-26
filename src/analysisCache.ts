@@ -1,0 +1,144 @@
+import * as vscode from "vscode";
+import * as logger from "./logger";
+
+/**
+ * Issue format from LLM analysis (matches design doc)
+ */
+export interface LlmIssue {
+  context: string;           // Few surrounding lines
+  verbatim: string;           // Exact problematic substring
+  description: string;        // Short description
+  failure_scenario: string;   // "This will cause a problem when..."
+  severity: "error" | "warning" | "info";  // Determines squiggly color (error=red, warning=yellow)
+}
+
+interface CachedResult {
+  issues: LlmIssue[];
+  timestamp: number;
+}
+
+/**
+ * Cache for incremental analysis results.
+ * Keyed by (filePath, nodeHash) to avoid re-analyzing unchanged nodes.
+ */
+class AnalysisCache {
+  // Map<filePath, Map<nodeHash, CachedResult>>
+  private cache: Map<string, Map<string, CachedResult>>;
+
+  constructor() {
+    this.cache = new Map();
+    logger.log("AnalysisCache: initialized");
+  }
+
+  /**
+   * Get cached issues for a given file and node hash.
+   * Returns undefined if not found or expired.
+   */
+  get(filePath: string, nodeHash: string): LlmIssue[] | undefined {
+    const fileCache = this.cache.get(filePath);
+    if (!fileCache) {
+      return undefined;
+    }
+
+    const cached = fileCache.get(nodeHash);
+    if (!cached) {
+      return undefined;
+    }
+
+    logger.log(`AnalysisCache: HIT for ${filePath} (hash: ${nodeHash.slice(0, 8)}...)`);
+    return cached.issues;
+  }
+
+  /**
+   * Store issues in cache for a given file and node hash.
+   */
+  set(filePath: string, nodeHash: string, issues: LlmIssue[]): void {
+    if (!this.cache.has(filePath)) {
+      this.cache.set(filePath, new Map());
+    }
+
+    const fileCache = this.cache.get(filePath)!;
+    fileCache.set(nodeHash, {
+      issues,
+      timestamp: Date.now(),
+    });
+
+    logger.log(`AnalysisCache: SET for ${filePath} (hash: ${nodeHash.slice(0, 8)}..., issues: ${issues.length})`);
+  }
+
+  /**
+   * Check if cache has entry for given file and node hash.
+   */
+  has(filePath: string, nodeHash: string): boolean {
+    const fileCache = this.cache.get(filePath);
+    if (!fileCache) {
+      return false;
+    }
+    return fileCache.has(nodeHash);
+  }
+
+  /**
+   * Invalidate all cached results for a given file.
+   * Called when file is closed or significantly changed.
+   */
+  invalidate(filePath: string): void {
+    if (this.cache.has(filePath)) {
+      this.cache.delete(filePath);
+      logger.log(`AnalysisCache: invalidated all entries for ${filePath}`);
+    }
+  }
+
+  /**
+   * Remove entries older than the specified age in milliseconds.
+   * Useful for periodic cleanup.
+   */
+  cleanOldEntries(maxAgeMs: number = 1000 * 60 * 30): void { // Default: 30 minutes
+    const now = Date.now();
+    let removedCount = 0;
+
+    for (const [filePath, fileCache] of this.cache.entries()) {
+      for (const [nodeHash, cached] of fileCache.entries()) {
+        if (now - cached.timestamp > maxAgeMs) {
+          fileCache.delete(nodeHash);
+          removedCount++;
+        }
+      }
+
+      // Remove empty file caches
+      if (fileCache.size === 0) {
+        this.cache.delete(filePath);
+      }
+    }
+
+    if (removedCount > 0) {
+      logger.log(`AnalysisCache: cleaned ${removedCount} old entries`);
+    }
+  }
+
+  /**
+   * Clear all cached results.
+   * Called on extension deactivation.
+   */
+  clear(): void {
+    const entryCount = this.cache.size;
+    this.cache.clear();
+    logger.log(`AnalysisCache: cleared all entries (${entryCount} files)`);
+  }
+
+  /**
+   * Get statistics about the cache.
+   */
+  getStats(): { files: number; totalEntries: number } {
+    let totalEntries = 0;
+    for (const fileCache of this.cache.values()) {
+      totalEntries += fileCache.size;
+    }
+    return {
+      files: this.cache.size,
+      totalEntries,
+    };
+  }
+}
+
+// Export singleton instance
+export const analysisCache = new AnalysisCache();
