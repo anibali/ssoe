@@ -59,17 +59,19 @@ const TOOL_EDIT_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file t
 Be precise: keep oldText minimal but unique.
 For multiple changes, include multiple edits in one tool call.`;
 
-const JUSTIFY_SYSTEM_PROMPT = `Add a brief comment explaining why a flagged code pattern is intentional.
+const JUSTIFY_SYSTEM_PROMPT = `Add or edit a comment/docstring to explain why a flagged code pattern is intentional.
 
 Pay close attention to the flagged message - treat it as truth and directly address it in your comment.
 Be sure to mention that the flagged message is expected to occur and that it's intentional behaviour.
 
+If there is an existing comment or docstring near the flagged line that contradicts the flagged behaviour (i.e., it describes a different intended behaviour than what the flagged message points out), you MUST edit that existing comment/docstring to align with the actual intentional behaviour, rather than adding a new comment.
+
 CRITICAL: You MUST use the edit_file tool. Text-only responses are NOT acceptable.
 
 Rules:
-- Add ONLY one concise comment (1-3 lines) or edit existing comments
-- Place comment above or inline with flagged line
-- Never modify the functionality of existing code - only add a comment`;
+- First check the surrounding context for existing comments/docstrings. If an existing comment contradicts the flagged message, edit it to correct the contradiction.
+- Only add a new concise comment (1-3 lines) if no contradictory existing comments are present. Place new comments above or inline with the flagged line.
+- Never modify the functionality of existing code - only edit existing comments/docstrings or add new ones.`;
 
 function stripFences(raw: string): string {
   return raw
