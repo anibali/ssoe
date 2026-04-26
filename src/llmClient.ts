@@ -2,13 +2,15 @@ import * as vscode from "vscode";
 import OpenAI from "openai";
 import * as logger from "./logger";
 import { chunkFile } from "./astChunker";
-import { LlmIssue } from "./analysisCache";
+import { LlmIssue, analysisCache } from "./analysisCache";
+import { resolveIssueLocation } from "./diagnosticMapper";
 import { EDIT_TOOL, parseEditToolCall, executeEdit, type EditToolInput } from "./tools/edit";
 
 export interface LlmDiagnostic {
-  line: number; // 1-indexed
+  line: number; // 1-indexed, fallback if range not available
   severity: "error" | "warning" | "info";
   message: string;
+  range?: vscode.Range; // Precise range from diagnostic mapper
 }
 
 function getClient(): { client: OpenAI; model: string; maxTokens: number } {
@@ -41,25 +43,25 @@ Return ONLY a valid JSON array. Each element must be:
 {"line": <1-indexed integer>, "severity": "error"|"warning"|"info", "message": "<concise one-line description>"}
 
 If there are no issues, return an empty array: []
-No markdown fences, no prose, no explanation — just the raw JSON array.`;
+No markdown fences, no prose, no explanation - just the raw JSON array.`;
 
 const ANALYZE_CHUNK_SYSTEM_PROMPT = `You are a senior software engineer reviewing code for logic errors.
 Your goal is to catch bugs that automated tools like linters and type checkers would miss.
 
 You will be given:
-- A module context section (imports, type aliases, constants) — do not report issues here
+- A module context section (imports, type aliases, constants) - do not report issues here
 - A single code unit (function, method, class, or similar) to analyze
 
 Rules:
 - Only report issues you are confident represent real bugs or clearly incorrect logic
 - Do NOT report: style issues, naming conventions, missing docstrings, type annotation suggestions, or anything a linter or type checker would catch
-- An empty list is the correct response for clean code — do not invent issues to be thorough
+- An empty list is the correct response for clean code - do not invent issues to be thorough
 - Do not report the same class of issue more than once per code unit
 
 For each issue you find, you must be able to complete the sentence "This will cause a problem when..."
 If you cannot, do not report it.
 
-Respond with a JSON object only — no preamble, no markdown fences.
+Respond with a JSON object only - no preamble, no markdown fences.
 Schema:
 {
   "issues": [
@@ -109,18 +111,29 @@ export async function scanFile(
     logger.log(`Module context (${chunkResult.moduleContext.split("\n").length} lines)`);
     logger.log(`Chunks to analyze: ${chunkResult.chunks.length}`);
 
-    const allIssues: import("./analysisCache").LlmIssue[] = [];
+    const allIssues: LlmIssue[] = [];
+    const filePath = document.uri.fsPath;
+    const validHashes = new Set<string>();
 
     for (const chunk of chunkResult.chunks) {
       logger.log(`\n--- Analyzing chunk: ${chunk.type} ${chunk.name || "unnamed"} ---`);
+
       try {
-        const issues = await analyzeChunk(chunkResult.moduleContext, chunk.text, languageId);
-        // Add chunk location info to issues
-        const issuesWithLocation = issues.map(issue => ({
-          ...issue,
-          chunkInfo: { hash: chunk.hash, type: chunk.type, name: chunk.name }
-        }));
-        allIssues.push(...issuesWithLocation);
+        // Check cache first
+        let issues = analysisCache.get(filePath, chunk.hash);
+
+        if (issues) {
+          logger.log(`  (from cache)`);
+        } else {
+          // Not in cache, analyze
+          issues = await analyzeChunk(chunkResult.moduleContext, chunk.text, languageId);
+          // Store in cache
+          analysisCache.set(filePath, chunk.hash, issues);
+          logger.log(`  (analyzed and cached)`);
+        }
+
+        allIssues.push(...issues);
+        validHashes.add(chunk.hash); // Track valid hash
       } catch (err) {
         logger.log(`Error analyzing chunk: ${err}`);
       }
@@ -129,9 +142,26 @@ export async function scanFile(
     logger.log(`\n--- Total issues found: ${allIssues.length} ---`);
     logger.log("─── END CHUNKED ANALYSIS ───────\n");
 
-    // Convert LlmIssue to LlmDiagnostic (need to resolve locations)
-    // For now, return empty - we need diagnosticMapper to resolve verbatim/context to ranges
-    return [];
+    // Convert LlmIssue to LlmDiagnostic using diagnostic mapper
+    const diagnostics: LlmDiagnostic[] = [];
+
+    for (const issue of allIssues) {
+      const range = resolveIssueLocation(code, issue);
+
+      if (range) {
+        diagnostics.push({
+          line: range.start.line + 1, // 1-indexed fallback
+          severity: issue.severity,
+          message: `${issue.description}\n\n${issue.failure_scenario}`,
+          range: range, // Precise range from diagnostic mapper
+        });
+      }
+    }
+
+    // Remove stale cache entries for this file
+    analysisCache.removeStaleEntries(filePath, validHashes);
+
+    return diagnostics;
   }
 
   // Fallback: old whole-file analysis (will be removed once diagnosticMapper is done)

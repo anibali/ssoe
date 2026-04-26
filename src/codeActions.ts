@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import { getJustificationComment, getToolBasedEdit } from "./llmClient";
+import { diagnosticCollection } from "./extension";
+import * as logger from "./logger";
 
 export const SSOE_SOURCE = "SSOE";
 
@@ -80,6 +82,15 @@ export async function applyToolBasedEdit(
   if (!result.success) {
     vscode.window.showErrorMessage(`SSOE smart fix failed: ${result.message}`);
     return;
+  }
+
+  // Remove the diagnostic after successful fix
+  const currentDiagnostics = diagnosticCollection.get(document.uri);
+  if (currentDiagnostics) {
+    // Filter out the exact diagnostic object that was fixed
+    const newDiagnostics = currentDiagnostics.filter(d => d !== diagnostic);
+    diagnosticCollection.set(document.uri, newDiagnostics);
+    logger.log(`Removed diagnostic after fix: ${diagnostic.message}`);
   }
 
   vscode.window.showInformationMessage(`SSOE: ${result.message}`);

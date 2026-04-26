@@ -78,6 +78,38 @@ class AnalysisCache {
   }
 
   /**
+   * Remove stale cache entries for a file.
+   * Keeps only entries whose hashes are in `validHashes`.
+   */
+  removeStaleEntries(filePath: string, validHashes: Set<string>): void {
+    const fileCache = this.cache.get(filePath);
+    if (!fileCache) {
+      return;
+    }
+
+    const keysToRemove: string[] = [];
+    for (const hash of fileCache.keys()) {
+      if (!validHashes.has(hash)) {
+        keysToRemove.push(hash);
+      }
+    }
+
+    for (const hash of keysToRemove) {
+      fileCache.delete(hash);
+      logger.log(`AnalysisCache: removed stale entry ${hash.slice(0, 8)}... for ${filePath}`);
+    }
+
+    // Clean up empty file cache
+    if (fileCache.size === 0) {
+      this.cache.delete(filePath);
+    }
+
+    if (keysToRemove.length > 0) {
+      logger.log(`AnalysisCache: removed ${keysToRemove.length} stale entries for ${filePath}`);
+    }
+  }
+
+  /**
    * Invalidate all cached results for a given file.
    * Called when file is closed or significantly changed.
    */

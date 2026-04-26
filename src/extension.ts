@@ -16,7 +16,7 @@ const SUPPORTED_LANGUAGES = [
   "typescriptreact",
 ];
 
-let diagnosticCollection: vscode.DiagnosticCollection;
+export let diagnosticCollection: vscode.DiagnosticCollection;
 
 export function activate(context: vscode.ExtensionContext) {
   logger.init(context);
@@ -49,18 +49,27 @@ export function activate(context: vscode.ExtensionContext) {
         },
         async () => {
           try {
-        const diagnostics = await scanFile(editor.document);
+            const diagnostics = await scanFile(editor.document);
 
             const vscodeDiagnostics = diagnostics.map((d) => {
-              // Line numbers from LLM are 1-indexed; VS Code is 0-indexed
-              const lineIndex = Math.max(0, d.line - 1);
-              const line = editor.document.lineAt(
-                Math.min(lineIndex, editor.document.lineCount - 1)
-              );
-              const range = new vscode.Range(
-                line.range.start,
-                line.range.end
-              );
+              // Use precise range from diagnostic mapper if available
+              let range: vscode.Range;
+
+              if (d.range) {
+                // Precise range from verbatim + context
+                range = d.range;
+              } else {
+                // Fallback: entire line (old behavior)
+                const lineIndex = Math.max(0, d.line - 1);
+                const line = editor.document.lineAt(
+                  Math.min(lineIndex, editor.document.lineCount - 1)
+                );
+                range = new vscode.Range(
+                  line.range.start,
+                  line.range.end
+                );
+              }
+
               const severity =
                 d.severity === "error"
                   ? vscode.DiagnosticSeverity.Error
@@ -96,9 +105,42 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  // ── Clear diagnostics when the file is edited ─────────────────────────────
+  // ── Remove diagnostics for edited region (smart persistence) ─────────
   const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
-    diagnosticCollection.delete(event.document.uri);
+    const uri = event.document.uri;
+    const filePath = uri.fsPath;
+
+    // Get current diagnostics for this file
+    const currentDiagnostics = diagnosticCollection.get(uri);
+    if (!currentDiagnostics || currentDiagnostics.length === 0) {
+      return; // No diagnostics to remove
+    }
+
+    // Get the range of the edit
+    for (const change of event.contentChanges) {
+      const editRange = change.range;
+
+      // Remove diagnostics that overlap with the edit
+      const newDiagnostics = currentDiagnostics.filter(d => {
+        // Check if diagnostic's range intersects with the edit range
+        const overlaps = d.range.intersection(editRange) !== undefined;
+        if (overlaps) {
+          logger.log(`Removing diagnostic at ${d.range.start.line + 1}:${d.range.start.character + 1} due to edit`);
+        }
+        return !overlaps;
+      });
+
+      // Update diagnostics
+      diagnosticCollection.set(uri, newDiagnostics);
+
+      // If we removed something, invalidate cache for this file
+      if (newDiagnostics.length < currentDiagnostics.length) {
+        // Will be re-analyzed on next manual scan
+        logger.log(`Diagnostics updated after edit, cache will be refreshed on next scan`);
+      }
+
+      break; // Only process first change for simplicity
+    }
   });
 
   // ── Command: apply tool-based fix ───────────────────────────────────────────
