@@ -103,7 +103,7 @@ export async function applyCodeFix(
     () =>
       getCodeFix(
         document,
-        diagnostic.message,
+        diagnostic,
         expectedVersion
       )
   );

@@ -366,18 +366,19 @@ Do NOT write text. Do NOT explain. Just call the edit_file tool now.`
 
 export async function getCodeFix(
   document: vscode.TextDocument,
-  diagnosticMessage: string,
+  diagnostic: vscode.Diagnostic,
   expectedVersion: number
 ): Promise<{ success: boolean; message: string; applied?: number }> {
   const code = document.getText();
   const filePath = document.uri.fsPath;
   const languageId = document.languageId;
+  const lineNumber = diagnostic.range.start.line + 1; // 1-indexed
 
   return executeWithToolRetry({
     systemPrompt: FIX_CODE_SYSTEM_PROMPT,
-    userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nIssue to fix: ${diagnosticMessage}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
+    userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nIssue to fix: ${diagnostic.message}\nLine number: ${lineNumber}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
     logLabel: `FIX CODE  ${filePath}`,
-    logContext: `issue: ${diagnosticMessage}`,
+    logContext: `issue: ${diagnostic.message}`,
     document,
     expectedVersion,
   });
@@ -392,30 +393,11 @@ export async function getIntentDoc(
   const filePath = document.uri.fsPath;
   const languageId = document.languageId;
   const lineNumber = diagnostic.range.start.line + 1; // 1-indexed
-  const lineText = document.lineAt(diagnostic.range.start.line).text;
-
-  // Extract surrounding context (10 lines before and after)
-  const lines = code.split("\n");
-  const startLine = Math.max(0, lineNumber - 11); // lineNumber is 1-indexed
-  const endLine = Math.min(lines.length, lineNumber + 9);
-  const surroundingContext = lines
-    .slice(startLine, endLine)
-    .map((line, i) => {
-      const currentLine = startLine + i + 1;
-      const marker = currentLine === lineNumber ? " >>> " : "     ";
-      return `${marker}${currentLine}: ${line}`;
-    })
-    .join("\n");
 
   return executeWithToolRetry({
     systemPrompt: DOCUMENT_INTENTIONAL_SYSTEM_PROMPT,
-    userMessage:
-      `Language: ${languageId}\n` +
-      `File: ${filePath}\n` +
-      `Flagged as: ${diagnostic.message}\n` +
-      `Line ${lineNumber} is marked with >>> :\n\n` +
-      surroundingContext,
-    logLabel: `DOCUMENT INTENTIONAL  line ${lineNumber}`,
+    userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nFlagged as: ${diagnostic.message}\nLine number: ${lineNumber}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
+    logLabel: `DOCUMENT INTENTIONAL  ${filePath}`,
     logContext: `issue: ${diagnostic.message}`,
     document,
     expectedVersion,
