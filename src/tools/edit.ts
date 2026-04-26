@@ -1,5 +1,6 @@
-import * as fs from "fs/promises";
 import * as path from "path";
+import * as vscode from "vscode";
+import * as logger from "../logger";
 
 /**
  * Simplified version of pi-mono's edit tool.
@@ -91,39 +92,114 @@ function applyEdits(content: string, edits: Edit[]): { result: string; applied: 
 
 /**
  * Execute the edit tool with the given input.
- * Resolves file paths relative to workspace root if needed.
+ * Uses VS Code document for in-memory editing.
+ *
+ * @param input - The edit tool input containing edits
+ * @param document - VS Code document to edit
+ * @param expectedVersion - Expected document version (fails if document changed)
  */
 export async function executeEdit(
   input: EditToolInput,
-  workspaceRoot?: string
-): Promise<{ success: boolean; message: string; applied?: number }> {
+  document: vscode.TextDocument,
+  expectedVersion: number
+): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
   try {
-    // Resolve path
-    let filePath = input.path;
-    if (workspaceRoot && !path.isAbsolute(filePath)) {
-      filePath = path.join(workspaceRoot, filePath);
-    }
-
-    // Read file
-    const content = await fs.readFile(filePath, "utf-8");
-
-    // Apply edits
-    const { result, applied } = applyEdits(content, input.edits);
-
-    // Write back
-    await fs.writeFile(filePath, result, "utf-8");
-
-    return {
-      success: true,
-      message: `Successfully applied ${applied} edit(s) to ${input.path}`,
-      applied,
-    };
+    return executeEditInDocument(input, document, expectedVersion);
   } catch (error) {
     return {
       success: false,
       message: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Execute edit in a VS Code document using in-memory buffer.
+ * Detects if document changed during LLM processing.
+ */
+async function executeEditInDocument(
+  input: EditToolInput,
+  document: vscode.TextDocument,
+  expectedVersion: number
+): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
+  // Check if document changed since we started
+  if (document.version !== expectedVersion) {
+    throw new Error(
+      "Document changed while generating fix. Please re-select the quick fix to apply the edit."
+    );
+  }
+
+  // Get in-memory content
+  const content = document.getText();
+  const editedRanges: Array<{ range: vscode.Range; lineDelta: number }> = [];
+
+  // Calculate edited ranges and line deltas before applying
+  let offset = 0;
+  for (const edit of input.edits) {
+    const index = content.indexOf(edit.oldText, offset);
+    if (index !== -1) {
+      const startPos = document.positionAt(index);
+      const endPos = document.positionAt(index + edit.oldText.length);
+      const oldLines = edit.oldText.split('\n').length;
+      const newLines = edit.newText.split('\n').length;
+      const lineDelta = newLines - oldLines;
+      editedRanges.push({ range: new vscode.Range(startPos, endPos), lineDelta });
+      offset = index + edit.oldText.length;
+    }
+  }
+
+  // Apply edits to content
+  let result: string;
+  let applied: number;
+  try {
+    const applyResult = applyEdits(content, input.edits);
+    result = applyResult.result;
+    applied = applyResult.applied;
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  // Log edited ranges for debugging
+  logger.log('\n--- Edited ranges ---');
+  for (const edited of editedRanges) {
+    logger.log(`Range: ${edited.range.start.line}-${edited.range.end.line}, lineDelta: ${edited.lineDelta}`);
+  }
+  logger.show();
+
+  // Create workspace edit - apply edits granularly using original positions
+  // VS Code applies all edits atomically, so positions should be relative to original document
+  const workspaceEdit = new vscode.WorkspaceEdit();
+
+  // Map each edit to its original position in the document
+  const editsWithPositions = input.edits.map((edit) => {
+    const originalIndex = content.indexOf(edit.oldText);
+    return { edit, originalIndex };
+  });
+
+  for (const { edit, originalIndex } of editsWithPositions) {
+    if (originalIndex === -1) continue;
+
+    const startPos = document.positionAt(originalIndex);
+    const endPos = document.positionAt(originalIndex + edit.oldText.length);
+
+    workspaceEdit.replace(document.uri, new vscode.Range(startPos, endPos), edit.newText);
+  }
+
+  // Apply the edit
+  const success = await vscode.workspace.applyEdit(workspaceEdit);
+  if (!success) {
+    throw new Error("Failed to apply edit to document");
+  }
+
+  return {
+    success: true,
+    message: `Successfully applied ${applied} edit(s) to ${path.basename(document.uri.fsPath)}`,
+    applied,
+    editedRanges,
+  };
 }
 
 /**

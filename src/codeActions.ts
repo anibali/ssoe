@@ -65,17 +65,16 @@ export async function applyToolBasedEdit(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic
 ): Promise<void> {
-  const code = document.getText();
-  const filePath = document.uri.fsPath;
+  // Capture document version BEFORE calling LLM
+  const expectedVersion = document.version;
 
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "SSOE: Smart fix using tool…" },
     () =>
       getToolBasedEdit(
-        code,
-        document.languageId,
+        document,
         diagnostic.message,
-        filePath
+        expectedVersion
       )
   );
 
@@ -100,21 +99,16 @@ export async function applyJustificationComment(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic
 ): Promise<void> {
-  const code = document.getText();
-  const lineIndex = diagnostic.range.start.line;
-  const lineText = document.lineAt(lineIndex).text;
-  const filePath = document.uri.fsPath;
+  // Capture document version BEFORE calling LLM
+  const expectedVersion = document.version;
 
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "SSOE: Generating comment…" },
     () =>
       getJustificationComment(
-        code,
-        lineIndex + 1,
-        lineText,
-        diagnostic.message,
-        document.languageId,
-        filePath
+        document,
+        diagnostic,
+        expectedVersion
       )
   );
 

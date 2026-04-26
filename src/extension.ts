@@ -7,6 +7,7 @@ import {
   applyToolBasedEdit,
 } from "./codeActions";
 import * as logger from "./logger";
+import { analysisCache } from "./analysisCache";
 
 const SUPPORTED_LANGUAGES = [
   "python",
@@ -24,6 +25,25 @@ export function activate(context: vscode.ExtensionContext) {
   diagnosticCollection =
     vscode.languages.createDiagnosticCollection(SSOE_SOURCE);
   context.subscriptions.push(diagnosticCollection);
+
+  // ── Clear diagnostics and chunk cache on file close/open (catches reload) ─────────
+  const closeListener = vscode.workspace.onDidCloseTextDocument((document) => {
+    const filePath = document.uri.fsPath;
+    if (diagnosticCollection.has(document.uri)) {
+      logger.log(`Clearing diagnostics on close: ${filePath}`);
+      diagnosticCollection.delete(document.uri);
+    }
+    analysisCache.clear(filePath);
+  });
+
+  const openListener = vscode.workspace.onDidOpenTextDocument((document) => {
+    const filePath = document.uri.fsPath;
+    if (diagnosticCollection.has(document.uri)) {
+      logger.log(`Clearing stale diagnostics on open: ${filePath}`);
+      diagnosticCollection.delete(document.uri);
+    }
+    analysisCache.clear(filePath);
+  });
 
   // ── Command: scan the current file ────────────────────────────────────────
   const scanCommand = vscode.commands.registerCommand(
@@ -120,29 +140,49 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Process changes from end to beginning to avoid position conflicts
     const sortedChanges = [...event.contentChanges].sort((a, b) => {
-      return b.range.start.line - a.range.start.line;
+      return b.range.start.line - a.range.start.line || b.range.start.character - a.range.start.character;
     });
 
     for (const change of sortedChanges) {
       const editRange = change.range;
+
+      // Use rangeLength from the change event (length in the ORIGINAL document)
+      const oldTextLength = change.rangeLength;
+      const newTextLength = change.text.length;
+      const charDelta = newTextLength - oldTextLength;
 
       // Calculate line delta (positive = lines added, negative = lines removed)
       const newLines = (change.text.match(/\n/g) || []).length;
       const oldLines = editRange.end.line - editRange.start.line;
       const deltaLines = newLines - oldLines;
 
-      if (deltaLines === 0) {
-        continue; // No line change, skip
+      if (deltaLines === 0 && charDelta === 0) {
+        continue; // No change, skip
       }
 
-      logger.log(`Edit at line(s) ${editRange.start.line + 1}-${editRange.end.line + 1}: delta = ${deltaLines} lines`);
-
-      // Adjust diagnostics that are after the edit
+      // Adjust diagnostics based on the edit
       const updated = adjustedDiagnostics.map(d => {
-        if (d.range.end.line >= editRange.end.line) {
-          // Shift this diagnostic by deltaLines
-          const newStartLine = d.range.start.line + deltaLines;
-          const newEndLine = d.range.end.line + deltaLines;
+        const diagStart = d.range.start;
+        const diagEnd = d.range.end;
+
+        // Case 1: Diagnostic is entirely after the edit region (different lines)
+        if (diagStart.line > editRange.end.line ||
+            (diagStart.line === editRange.end.line && diagStart.character >= editRange.end.character)) {
+
+          let newStartLine = diagStart.line + deltaLines;
+          let newEndLine = diagEnd.line + deltaLines;
+          let newStartChar = diagStart.character;
+          let newEndChar = diagEnd.character;
+
+          // If the diagnostic starts on the same line as the edit ended, adjust characters
+          if (diagStart.line === editRange.end.line) {
+            newStartChar = diagStart.character + charDelta;
+          }
+
+          // If the diagnostic ends on the same line as the edit ended, adjust characters
+          if (diagEnd.line === editRange.end.line) {
+            newEndChar = diagEnd.character + charDelta;
+          }
 
           // Validate new position
           if (newStartLine < 0 || newEndLine >= event.document.lineCount) {
@@ -152,17 +192,26 @@ export function activate(context: vscode.ExtensionContext) {
 
           const newRange = new vscode.Range(
             newStartLine,
-            d.range.start.character,
+            Math.max(0, newStartChar),
             newEndLine,
-            d.range.end.character
+            Math.max(0, newEndChar)
           );
 
-          // Create new diagnostic with adjusted range
           const newDiag = new vscode.Diagnostic(newRange, d.message, d.severity);
           newDiag.source = d.source;
           newDiag.code = d.code;
           return newDiag;
         }
+
+        // Case 2: Diagnostic overlaps with the edit region - remove it (too complex to adjust)
+        if (d.range.intersection(editRange) ||
+            (d.range.end.line === editRange.start.line && d.range.end.character > editRange.start.character) ||
+            (d.range.start.line === editRange.end.line && d.range.start.character < editRange.end.character)) {
+          logger.log(`Removing diagnostic at line ${d.range.start.line + 1} - overlaps with edit`);
+          return null;
+        }
+
+        // Case 3: Diagnostic is before the edit - no adjustment needed
         return d;
       }).filter(d => d !== null) as vscode.Diagnostic[];
 
@@ -213,6 +262,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     scanCommand,
     changeListener,
+    closeListener,
+    openListener,
     fixCommand,
     commentCommand,
     codeActionProvider

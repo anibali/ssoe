@@ -33,9 +33,11 @@ const SCAN_SYSTEM_PROMPT = `You are an expert code reviewer acting as a semantic
 Analyze the code and identify real problems: logic errors, bugs, missing returns,
 unreachable code, bad practices, and subtle issues that rule-based linters miss.
 Do NOT flag style preferences or things that are clearly intentional.
-Read docstrings and comments to determine whether suspected issues
-have already been acknowledged or are accepted as intended behaviour
-(do not report these).
+
+Pay close attention to docstrings and comments.
+If behaviour is described as intentional, NEVER flag that code as an issue.
+Think about your list of issues to check that none have such an associated comment.
+
 The user's time is precious, so do not be overly pedantic.
 It is often correct to return no issues, so do that when appropriate.
 
@@ -79,19 +81,17 @@ const TOOL_EDIT_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file t
 Be precise: keep oldText minimal but unique.
 For multiple changes, include multiple edits in one tool call.`;
 
-const JUSTIFY_SYSTEM_PROMPT = `You are adding a brief comment to document why a code pattern is intentional.
-CRITICAL RULES:
-1. ONLY add a comment - never modify, delete, or rearrange existing code
-2. Your edit must add exactly one comment near the flagged line
-3. The comment should explain WHY the pattern exists (not what it does)
-4. Keep the comment concise (one line preferred, max 3 lines)
-5. Place the comment above or inline with the flagged line
-6. Use language-appropriate comment syntax
+const JUSTIFY_SYSTEM_PROMPT = `Add a brief comment explaining why a flagged code pattern is intentional.
 
-Example good comment above a missing return that is intentional:
-// Deliberately returns undefined - caller handles nil check
+Pay close attention to the flagged message - treat it as truth and directly address it in your comment.
+Be sure to mention that the flagged message is expected to occur and that it's intentional behaviour.
 
-Use the edit_file tool. Make oldText minimal (just enough to be unique) and add only the comment.`;
+CRITICAL: You MUST use the edit_file tool. Text-only responses are NOT acceptable.
+
+Rules:
+- Add ONLY one concise comment (1-3 lines) or edit existing comments
+- Place comment above or inline with flagged line
+- Never modify the functionality of existing code - only add a comment`;
 
 function stripFences(raw: string): string {
   return raw
@@ -318,18 +318,20 @@ export async function analyzeChunk(
 interface ToolEditOptions {
   systemPrompt: string;
   userMessage: string;
-  filePath: string;
   logLabel: string;
   logContext?: string;
+  document: vscode.TextDocument;
+  expectedVersion: number;
 }
 
 async function executeWithToolRetry({
   systemPrompt,
   userMessage,
-  filePath,
   logLabel,
   logContext,
-}: ToolEditOptions): Promise<{ success: boolean; message: string; applied?: number }> {
+  document,
+  expectedVersion,
+}: ToolEditOptions): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
   const { client, model } = getClient();
   const MAX_RETRIES = 3;
 
@@ -362,7 +364,33 @@ async function executeWithToolRetry({
     }
 
     if (!message?.tool_calls?.length) {
-      throw new Error("Model did not use the edit tool");
+      // Model didn't use the tool - retry with feedback
+      if (attempt === MAX_RETRIES) {
+        throw new Error("Model did not use the edit tool after " + MAX_RETRIES + " attempts");
+      }
+
+      logger.log(`\n⚠️  Model didn't use edit tool, retrying...`);
+      messages.push({
+        role: "user",
+        content: `ERROR: You ignored the tool requirement.
+
+You MUST call the edit_file tool. Your previous response did NOT include a tool call.
+
+Correct format:
+{
+  "role": "assistant",
+  "tool_calls": [{
+    "type": "function",
+    "function": {
+      "name": "edit_file",
+      "arguments": "{\"path\": \"...\", \"edits\": [...]}"
+    }
+  }]
+}
+
+Do NOT write text. Do NOT explain. Just call the edit_file tool now.`
+      });
+      continue;
     }
 
     const toolCall = message.tool_calls[0];
@@ -391,10 +419,9 @@ async function executeWithToolRetry({
       continue;
     }
 
-    input.path = filePath;
+    input.path = document.uri.fsPath;
 
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const result = await executeEdit(input, workspaceRoot);
+    const result = await executeEdit(input, document, expectedVersion);
 
     logger.log(`\n--- edit result ---\n${JSON.stringify(result, null, 2)}`);
 
@@ -405,7 +432,7 @@ async function executeWithToolRetry({
 
     if (attempt === MAX_RETRIES) {
       logger.show();
-      return result;
+      return { success: false, message: "Max retries exceeded", editedRanges: undefined };
     }
 
     logger.log(`\n--- retrying after failure: ${result.message} ---`);
@@ -431,28 +458,34 @@ async function executeWithToolRetry({
 }
 
 export async function getToolBasedEdit(
-  code: string,
-  languageId: string,
+  document: vscode.TextDocument,
   diagnosticMessage: string,
-  filePath: string
+  expectedVersion: number
 ): Promise<{ success: boolean; message: string; applied?: number }> {
+  const code = document.getText();
+  const filePath = document.uri.fsPath;
+  const languageId = document.languageId;
+
   return executeWithToolRetry({
     systemPrompt: TOOL_EDIT_SYSTEM_PROMPT,
     userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nIssue to fix: ${diagnosticMessage}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
-    filePath,
     logLabel: `TOOL-BASED EDIT  ${filePath}`,
     logContext: `issue: ${diagnosticMessage}`,
+    document,
+    expectedVersion,
   });
 }
-
 export async function getJustificationComment(
-  code: string,
-  lineNumber: number,
-  lineText: string,
-  diagnosticMessage: string,
-  languageId: string,
-  filePath: string
-): Promise<{ success: boolean; message: string; applied?: number }> {
+  document: vscode.TextDocument,
+  diagnostic: vscode.Diagnostic,
+  expectedVersion: number
+): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
+  const code = document.getText();
+  const filePath = document.uri.fsPath;
+  const languageId = document.languageId;
+  const lineNumber = diagnostic.range.start.line + 1; // 1-indexed
+  const lineText = document.lineAt(diagnostic.range.start.line).text;
+
   // Extract surrounding context (10 lines before and after)
   const lines = code.split("\n");
   const startLine = Math.max(0, lineNumber - 11); // lineNumber is 1-indexed
@@ -471,11 +504,12 @@ export async function getJustificationComment(
     userMessage:
       `Language: ${languageId}\n` +
       `File: ${filePath}\n` +
-      `Flagged as: ${diagnosticMessage}\n` +
+      `Flagged as: ${diagnostic.message}\n` +
       `Line ${lineNumber} is marked with >>> :\n\n` +
       surroundingContext,
-    filePath,
     logLabel: `JUSTIFY  line ${lineNumber}`,
-    logContext: `issue: ${diagnosticMessage}`,
+    logContext: `issue: ${diagnostic.message}`,
+    document,
+    expectedVersion,
   });
 }

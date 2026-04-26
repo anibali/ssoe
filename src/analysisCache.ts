@@ -97,6 +97,16 @@ class AnalysisCache {
       logger.log(`AnalysisCache: removed ${keysToRemove.length} stale entries for ${filePath}`);
     }
   }
+
+  /**
+   * Clear all cached entries for a specific file.
+   */
+  clear(filePath: string): void {
+    if (this.cache.has(filePath)) {
+      this.cache.delete(filePath);
+      logger.log(`AnalysisCache: cleared all entries for ${filePath}`);
+    }
+  }
 }
 
 // Export singleton instance
