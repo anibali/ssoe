@@ -202,9 +202,8 @@ export function processDocumentChange(
       const diagEnd = d.range.end;
 
       // Check if diagnostic overlaps with the edit region
-      const overlaps = d.range.intersection(editRange) ||
-          (diagEnd.line === editRange.start.line && diagEnd.character > editRange.start.character) ||
-          (diagStart.line === editRange.end.line && diagStart.character < editRange.end.character);
+      // Use intersection() which properly handles all overlap cases
+      const overlaps = d.range.intersection(editRange) !== undefined;
 
       if (overlaps) {
         logger.log(`Removing diagnostic at line ${diagStart.line + 1} - overlaps with edit`);

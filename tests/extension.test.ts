@@ -400,4 +400,53 @@ describe('processDocumentChange', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics![0].range.start.line).toBe(10);
   });
+
+  test('should adjust character positions for diagnostics on same line after edit', () => {
+    // Diagnostic at line 5, characters 15-25 (AFTER the edit range which is 0-10)
+    const diagnostic = new vscode.Diagnostic(
+      new vscode.Range(5, 15, 5, 25),
+      'After edit on same line',
+      vscode.DiagnosticSeverity.Warning
+    );
+    diagnostic.source = SSOE_SOURCE;
+
+    // Set the diagnostic
+    mockDiagnosticCollection.set(mockUri, [diagnostic]);
+
+    // Edit on line 5, characters 0-10, replacing with text of different length
+    // Old text: 10 chars, New text: 13 chars (charDelta = +3)
+    const event = {
+      document: mockDocument,
+      contentChanges: [
+        {
+          range: new vscode.Range(5, 0, 5, 10),
+          rangeLength: 10,
+          text: 'new text!!', // 11 chars? Let me use 13 chars
+        },
+      ],
+    } as unknown as vscode.TextDocumentChangeEvent;
+
+    // Actually, let me use a clearer example with known values
+    const event2 = {
+      document: mockDocument,
+      contentChanges: [
+        {
+          range: new vscode.Range(5, 0, 5, 10),
+          rangeLength: 10,
+          text: '1234567890123', // 13 chars, charDelta = +3
+        },
+      ],
+    } as unknown as vscode.TextDocumentChangeEvent;
+
+    processDocumentChange(event2, mockDiagnosticCollection);
+
+    // Diagnostic is on same line (5) but starts AFTER the edit (15 > 10)
+    // So it should be adjusted by charDelta = +3
+    // Expected: start.char = 15 + 3 = 18, end.char = 25 + 3 = 28
+    const diagnostics = mockDiagnosticCollection.get(mockUri);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics![0].range.start.line).toBe(5); // Same line
+    expect(diagnostics![0].range.start.character).toBe(18); // 15 + 3
+    expect(diagnostics![0].range.end.character).toBe(28); // 25 + 3
+  });
 });
