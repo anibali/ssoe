@@ -4,7 +4,10 @@ MY_CONSTANT = 5
 
 
 def get_child(children: Iterable[str]) -> str:
-    """Return the first child; if multiple children are present, a warning is printed and the second child is returned."""
+    """Return the first child.
+
+    Warns when there are multiple children.
+    """
     child: str | None = None
     count = 0
     for child in children:
