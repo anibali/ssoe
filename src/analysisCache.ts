@@ -67,17 +67,6 @@ class AnalysisCache {
   }
 
   /**
-   * Check if cache has entry for given file and node hash.
-   */
-  has(filePath: string, nodeHash: string): boolean {
-    const fileCache = this.cache.get(filePath);
-    if (!fileCache) {
-      return false;
-    }
-    return fileCache.has(nodeHash);
-  }
-
-  /**
    * Remove stale cache entries for a file.
    * Keeps only entries whose hashes are in `validHashes`.
    */
@@ -107,68 +96,6 @@ class AnalysisCache {
     if (keysToRemove.length > 0) {
       logger.log(`AnalysisCache: removed ${keysToRemove.length} stale entries for ${filePath}`);
     }
-  }
-
-  /**
-   * Invalidate all cached results for a given file.
-   * Called when file is closed or significantly changed.
-   */
-  invalidate(filePath: string): void {
-    if (this.cache.has(filePath)) {
-      this.cache.delete(filePath);
-      logger.log(`AnalysisCache: invalidated all entries for ${filePath}`);
-    }
-  }
-
-  /**
-   * Remove entries older than the specified age in milliseconds.
-   * Useful for periodic cleanup.
-   */
-  cleanOldEntries(maxAgeMs: number = 1000 * 60 * 30): void { // Default: 30 minutes
-    const now = Date.now();
-    let removedCount = 0;
-
-    for (const [filePath, fileCache] of this.cache.entries()) {
-      for (const [nodeHash, cached] of fileCache.entries()) {
-        if (now - cached.timestamp > maxAgeMs) {
-          fileCache.delete(nodeHash);
-          removedCount++;
-        }
-      }
-
-      // Remove empty file caches
-      if (fileCache.size === 0) {
-        this.cache.delete(filePath);
-      }
-    }
-
-    if (removedCount > 0) {
-      logger.log(`AnalysisCache: cleaned ${removedCount} old entries`);
-    }
-  }
-
-  /**
-   * Clear all cached results.
-   * Called on extension deactivation.
-   */
-  clear(): void {
-    const entryCount = this.cache.size;
-    this.cache.clear();
-    logger.log(`AnalysisCache: cleared all entries (${entryCount} files)`);
-  }
-
-  /**
-   * Get statistics about the cache.
-   */
-  getStats(): { files: number; totalEntries: number } {
-    let totalEntries = 0;
-    for (const fileCache of this.cache.values()) {
-      totalEntries += fileCache.size;
-    }
-    return {
-      files: this.cache.size,
-      totalEntries,
-    };
   }
 }
 
