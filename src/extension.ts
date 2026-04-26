@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { randomUUID } from "crypto";
 import { scanFile } from "./llmClient";
 import {
   SsoeCodeActionProvider,
@@ -85,6 +86,14 @@ export function activate(context: vscode.ExtensionContext) {
                 severity
               );
               diagnostic.source = SSOE_SOURCE;
+              // Assign a unique ID in the target URN for tracking
+              // value is last 7 chars of UUID (short, somewhat meaningful), target contains the full UUID URN
+              const uuid = randomUUID();
+              const shortId = uuid.slice(-7);
+              diagnostic.code = {
+                value: shortId,
+                target: vscode.Uri.parse(`urn:ssoe:${uuid}`)
+              };
               return diagnostic;
             });
 
