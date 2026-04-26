@@ -1,7 +1,13 @@
 import * as vscode from "vscode";
-import { getJustificationComment, getToolBasedEdit } from "./llmClient";
+import { getIntentDoc, getCodeFix } from "./llmClient";
 import { diagnosticCollection } from "./extension";
 import * as logger from "./logger";
+
+/** Extract first line from a string (cut at first newline) */
+function firstLine(text: string): string {
+  const idx = text.indexOf("\n");
+  return idx === -1 ? text : text.substring(0, idx);
+}
 
 /**
  * Compare two diagnostics by value (range, message, source, severity)
@@ -43,49 +49,49 @@ export class SsoeCodeActionProvider implements vscode.CodeActionProvider {
     const actions: vscode.CodeAction[] = [];
 
     for (const diagnostic of diagnostics) {
-      actions.push(this.makeToolBasedEdit(document, diagnostic));
-      actions.push(this.makeJustificationComment(document, diagnostic));
+      actions.push(this.makeCodeFix(document, diagnostic));
+      actions.push(this.makeIntentDoc(document, diagnostic));
     }
 
     return actions;
   }
 
-  private makeToolBasedEdit(
+  private makeCodeFix(
     document: vscode.TextDocument,
     diagnostic: vscode.Diagnostic
   ): vscode.CodeAction {
     const action = new vscode.CodeAction(
-      `🔨 SSOE: Smart Fix — ${diagnostic.message}`,
+      `🔨 SSOE: Fix code — ${firstLine(diagnostic.message)}`,
       vscode.CodeActionKind.QuickFix
     );
     action.diagnostics = [diagnostic];
     action.command = {
-      command: "ssoe.applyToolBasedEdit",
-      title: "Apply smart fix using tool",
+      command: "ssoe.fixCode",
+      title: "Fix code",
       arguments: [document, diagnostic],
     };
     return action;
   }
 
-  private makeJustificationComment(
+  private makeIntentDoc(
     document: vscode.TextDocument,
     diagnostic: vscode.Diagnostic
   ): vscode.CodeAction {
     const action = new vscode.CodeAction(
-      `💬 SSOE: Justify — ${diagnostic.message}`,
+      `💬 SSOE: Document as intentional — ${firstLine(diagnostic.message)}`,
       vscode.CodeActionKind.QuickFix
     );
     action.diagnostics = [diagnostic];
     action.command = {
-      command: "ssoe.applyJustificationComment",
-      title: "Add justification comment",
+      command: "ssoe.documentIntentional",
+      title: "Document as intentional",
       arguments: [document, diagnostic],
     };
     return action;
   }
 }
 
-export async function applyToolBasedEdit(
+export async function applyCodeFix(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic
 ): Promise<void> {
@@ -93,9 +99,9 @@ export async function applyToolBasedEdit(
   const expectedVersion = document.version;
 
   const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "SSOE: Smart fix using tool…" },
+    { location: vscode.ProgressLocation.Notification, title: "SSOE: Fix code…" },
     () =>
-      getToolBasedEdit(
+      getCodeFix(
         document,
         diagnostic.message,
         expectedVersion
@@ -103,7 +109,7 @@ export async function applyToolBasedEdit(
   );
 
   if (!result.success) {
-    vscode.window.showErrorMessage(`SSOE smart fix failed: ${result.message}`);
+    vscode.window.showErrorMessage(`SSOE fix code failed: ${result.message}`);
     return;
   }
 
@@ -124,7 +130,7 @@ export async function applyToolBasedEdit(
   vscode.window.showInformationMessage(`SSOE: ${result.message}`);
 }
 
-export async function applyJustificationComment(
+export async function applyIntentDoc(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic
 ): Promise<void> {
@@ -134,7 +140,7 @@ export async function applyJustificationComment(
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "SSOE: Generating comment…" },
     () =>
-      getJustificationComment(
+      getIntentDoc(
         document,
         diagnostic,
         expectedVersion
@@ -142,11 +148,11 @@ export async function applyJustificationComment(
   );
 
   if (!result.success) {
-    vscode.window.showErrorMessage(`SSOE justification comment failed: ${result.message}`);
+    vscode.window.showErrorMessage(`SSOE document intentional failed: ${result.message}`);
     return;
   }
 
-  // Remove the diagnostic after adding justification comment
+  // Remove the diagnostic after documenting as intentional
   const currentDiagnostics = diagnosticCollection.get(document.uri);
   if (currentDiagnostics) {
     const newDiagnostics = currentDiagnostics.filter(
@@ -154,7 +160,7 @@ export async function applyJustificationComment(
     );
     diagnosticCollection.set(document.uri, newDiagnostics);
     logger.log(
-      `Removed diagnostic after justification: ${diagnostic.message} (${currentDiagnostics.length} → ${newDiagnostics.length})`
+      `Removed diagnostic after documenting as intentional: ${diagnostic.message} (${currentDiagnostics.length} → ${newDiagnostics.length})`
     );
   }
 

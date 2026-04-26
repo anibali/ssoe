@@ -55,11 +55,11 @@ Respond with a JSON array only (no preamble, no markdown fences):
 
 If there are no issues, return: []`;
 
-const TOOL_EDIT_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file tool to apply fixes.
+const FIX_CODE_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file tool to apply fixes.
 Be precise: keep oldText minimal but unique.
 For multiple changes, include multiple edits in one tool call.`;
 
-const JUSTIFY_SYSTEM_PROMPT = `Add or edit a comment/docstring to explain why a flagged code pattern is intentional.
+const DOCUMENT_INTENTIONAL_SYSTEM_PROMPT = `Add or edit a comment/docstring to explain why a flagged code pattern is intentional.
 
 Pay close attention to the flagged message - treat it as truth and directly address it in your comment.
 Be sure to mention that the flagged message is expected to occur and that it's intentional behaviour.
@@ -364,7 +364,7 @@ Do NOT write text. Do NOT explain. Just call the edit_file tool now.`
   return { success: false, message: "Max retries exceeded" };
 }
 
-export async function getToolBasedEdit(
+export async function getCodeFix(
   document: vscode.TextDocument,
   diagnosticMessage: string,
   expectedVersion: number
@@ -374,16 +374,16 @@ export async function getToolBasedEdit(
   const languageId = document.languageId;
 
   return executeWithToolRetry({
-    systemPrompt: TOOL_EDIT_SYSTEM_PROMPT,
+    systemPrompt: FIX_CODE_SYSTEM_PROMPT,
     userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nIssue to fix: ${diagnosticMessage}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
-    logLabel: `TOOL-BASED EDIT  ${filePath}`,
+    logLabel: `FIX CODE  ${filePath}`,
     logContext: `issue: ${diagnosticMessage}`,
     document,
     expectedVersion,
   });
 }
 
-export async function getJustificationComment(
+export async function getIntentDoc(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic,
   expectedVersion: number
@@ -408,14 +408,14 @@ export async function getJustificationComment(
     .join("\n");
 
   return executeWithToolRetry({
-    systemPrompt: JUSTIFY_SYSTEM_PROMPT,
+    systemPrompt: DOCUMENT_INTENTIONAL_SYSTEM_PROMPT,
     userMessage:
       `Language: ${languageId}\n` +
       `File: ${filePath}\n` +
       `Flagged as: ${diagnostic.message}\n` +
       `Line ${lineNumber} is marked with >>> :\n\n` +
       surroundingContext,
-    logLabel: `JUSTIFY  line ${lineNumber}`,
+    logLabel: `DOCUMENT INTENTIONAL  line ${lineNumber}`,
     logContext: `issue: ${diagnostic.message}`,
     document,
     expectedVersion,

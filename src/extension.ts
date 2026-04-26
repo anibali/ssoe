@@ -3,8 +3,8 @@ import { scanFile } from "./llmClient";
 import {
   SsoeCodeActionProvider,
   SSOE_SOURCE,
-  applyJustificationComment,
-  applyToolBasedEdit,
+  applyIntentDoc,
+  applyCodeFix,
 } from "./codeActions";
 import * as logger from "./logger";
 
@@ -112,26 +112,26 @@ export function activate(context: vscode.ExtensionContext) {
     processDocumentChange(event, diagnosticCollection);
   });
 
-  // ── Command: apply tool-based fix ───────────────────────────────────────────
+  // ── Command: fix code ───────────────────────────────────────────
   const fixCommand = vscode.commands.registerCommand(
-    "ssoe.applyToolBasedEdit",
+    "ssoe.fixCode",
     async (document: vscode.TextDocument, diagnostic: vscode.Diagnostic) => {
       try {
-        await applyToolBasedEdit(document, diagnostic);
+        await applyCodeFix(document, diagnostic);
       } catch (err) {
-        vscode.window.showErrorMessage(`SSOE smart fix failed: ${err}`);
+        vscode.window.showErrorMessage(`SSOE fix code failed: ${err}`);
       }
     }
   );
 
-  // ── Command: add justification comment ────────────────────────────────────
+  // ── Command: document as intentional ────────────────────────────────────
   const commentCommand = vscode.commands.registerCommand(
-    "ssoe.applyJustificationComment",
+    "ssoe.documentIntentional",
     async (document: vscode.TextDocument, diagnostic: vscode.Diagnostic) => {
       try {
-        await applyJustificationComment(document, diagnostic);
+        await applyIntentDoc(document, diagnostic);
       } catch (err) {
-        vscode.window.showErrorMessage(`SSOE comment failed: ${err}`);
+        vscode.window.showErrorMessage(`SSOE document intentional failed: ${err}`);
       }
     }
   );
