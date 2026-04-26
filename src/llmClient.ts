@@ -75,6 +75,24 @@ Schema:
   ]
 }`;
 
+const TOOL_EDIT_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file tool to apply fixes.
+Be precise: keep oldText minimal but unique.
+For multiple changes, include multiple edits in one tool call.`;
+
+const JUSTIFY_SYSTEM_PROMPT = `You are adding a brief comment to document why a code pattern is intentional.
+CRITICAL RULES:
+1. ONLY add a comment - never modify, delete, or rearrange existing code
+2. Your edit must add exactly one comment near the flagged line
+3. The comment should explain WHY the pattern exists (not what it does)
+4. Keep the comment concise (one line preferred, max 3 lines)
+5. Place the comment above or inline with the flagged line
+6. Use language-appropriate comment syntax
+
+Example good comment above a missing return that is intentional:
+// Deliberately returns undefined - caller handles nil check
+
+Use the edit_file tool. Make oldText minimal (just enough to be unique) and add only the comment.`;
+
 function stripFences(raw: string): string {
   return raw
     .trim()
@@ -419,10 +437,7 @@ export async function getToolBasedEdit(
   filePath: string
 ): Promise<{ success: boolean; message: string; applied?: number }> {
   return executeWithToolRetry({
-    systemPrompt:
-      "You are fixing code issues. Use the edit_file tool to apply fixes. " +
-      "Be precise: keep oldText minimal but unique. " +
-      "For multiple changes, include multiple edits in one tool call.",
+    systemPrompt: TOOL_EDIT_SYSTEM_PROMPT,
     userMessage: `Language: ${languageId}\nFile: ${filePath}\n\nIssue to fix: ${diagnosticMessage}\n\nFull file:\n\`\`\`${languageId}\n${code}\n\`\`\``,
     filePath,
     logLabel: `TOOL-BASED EDIT  ${filePath}`,
@@ -438,20 +453,27 @@ export async function getJustificationComment(
   languageId: string,
   filePath: string
 ): Promise<{ success: boolean; message: string; applied?: number }> {
+  // Extract surrounding context (10 lines before and after)
+  const lines = code.split("\n");
+  const startLine = Math.max(0, lineNumber - 11); // lineNumber is 1-indexed
+  const endLine = Math.min(lines.length, lineNumber + 9);
+  const surroundingContext = lines
+    .slice(startLine, endLine)
+    .map((line, i) => {
+      const currentLine = startLine + i + 1;
+      const marker = currentLine === lineNumber ? " >>> " : "     ";
+      return `${marker}${currentLine}: ${line}`;
+    })
+    .join("\n");
+
   return executeWithToolRetry({
-    systemPrompt:
-      "You are writing a concise code comment or concise documentation " +
-      "in nearby location to justify an intentional code pattern. " +
-      "Use the edit_file tool to provide your comment/documentation.",
+    systemPrompt: JUSTIFY_SYSTEM_PROMPT,
     userMessage:
       `Language: ${languageId}\n` +
       `File: ${filePath}\n` +
-      `Line ${lineNumber}: ${lineText}\n` +
-      `Flagged as: ${diagnosticMessage}\n\n` +
-      `Full file:\n` +
-      `\`\`\`${languageId}\n` +
-      `${code}\n` +
-      `\`\`\``,
+      `Flagged as: ${diagnosticMessage}\n` +
+      `Line ${lineNumber} is marked with >>> :\n\n` +
+      surroundingContext,
     filePath,
     logLabel: `JUSTIFY  line ${lineNumber}`,
     logContext: `issue: ${diagnosticMessage}`,
