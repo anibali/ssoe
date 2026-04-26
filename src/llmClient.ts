@@ -30,29 +30,28 @@ function getClient(): { client: OpenAI; model: string; maxTokens: number } {
 }
 
 const SCAN_SYSTEM_PROMPT = `You are an expert code reviewer acting as a semantic linter.
-Analyze the code and identify real problems: logic errors, bugs, missing returns,
-unreachable code, bad practices, and subtle issues that rule-based linters miss.
-Do NOT flag style preferences or things that are clearly intentional.
+Identify real problems: logic errors, bugs, missing returns, unreachable code,
+and subtle issues that rule-based linters miss. Do NOT flag style or clearly intentional code.
 
-Pay close attention to docstrings and comments.
-If behaviour is described as intentional, NEVER flag that code as an issue.
-Think about your list of issues to check that none have such an associated comment.
+CRITICAL: Comments and docstrings are gold-standard indicators of intended behaviour.
+If code has an associated comment describing its purpose, NEVER flag it as an issue.
+Before reporting, verify no comment justifies the flagged pattern.
 
-The user's time is precious, so do not be overly pedantic.
-It is often correct to return no issues, so do that when appropriate.
+IMPORTANT: Aggressively flag mismatches between likely intended behaviour
+(whether from comments or clear context) and actual behaviour.
 
-Respond with a JSON array only - no preamble, no markdown fences.
-Each element must be:
-{
-  "context": "<a few lines of surrounding code to uniquely locate the issue>",
-  "verbatim": "<the exact problematic text, must appear verbatim inside context>",
+The user's time is precious—avoid pedantry. Return no issues when appropriate.
+
+Respond with a JSON array only (no preamble, no markdown fences):
+[{
+  "context": "<a few surrounding lines to uniquely locate the issue>",
+  "verbatim": "<exact problematic text, verbatim within context>",
   "description": "<short description of the issue>",
   "failure_scenario": "<concrete completion of 'This will cause a problem when...'>",
   "severity": "error" | "warning" | "info"
-}
+}]
 
-If there are no issues, return an empty array: []
-No markdown fences, no prose, no explanation - just the raw JSON array.`;
+If there are no issues, return: []`;
 
 const TOOL_EDIT_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file tool to apply fixes.
 Be precise: keep oldText minimal but unique.
