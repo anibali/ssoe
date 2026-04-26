@@ -3,6 +3,30 @@ import { getJustificationComment, getToolBasedEdit } from "./llmClient";
 import { diagnosticCollection } from "./extension";
 import * as logger from "./logger";
 
+/**
+ * Compare two diagnostics by value (range, message, source, severity)
+ * since object references may differ after edit adjustments.
+ */
+function areDiagnosticsEqual(
+  d1: vscode.Diagnostic,
+  d2: vscode.Diagnostic
+): boolean {
+  // Compare range
+  if (
+    d1.range.start.line !== d2.range.start.line ||
+    d1.range.start.character !== d2.range.start.character ||
+    d1.range.end.line !== d2.range.end.line ||
+    d1.range.end.character !== d2.range.end.character
+  ) {
+    return false;
+  }
+  // Compare message, source, and severity
+  if (d1.message !== d2.message) return false;
+  if (d1.source !== d2.source) return false;
+  if (d1.severity !== d2.severity) return false;
+  return true;
+}
+
 export const SSOE_SOURCE = "SSOE";
 
 export class SsoeCodeActionProvider implements vscode.CodeActionProvider {
@@ -86,10 +110,15 @@ export async function applyToolBasedEdit(
   // Remove the diagnostic after successful fix
   const currentDiagnostics = diagnosticCollection.get(document.uri);
   if (currentDiagnostics) {
-    // Filter out the exact diagnostic object that was fixed
-    const newDiagnostics = currentDiagnostics.filter(d => d !== diagnostic);
+    // Filter out the diagnostic that was fixed using value comparison
+    // (reference equality fails after edit adjustments create new objects)
+    const newDiagnostics = currentDiagnostics.filter(
+      (d) => !areDiagnosticsEqual(d, diagnostic)
+    );
     diagnosticCollection.set(document.uri, newDiagnostics);
-    logger.log(`Removed diagnostic after fix: ${diagnostic.message}`);
+    logger.log(
+      `Removed diagnostic after fix: ${diagnostic.message} (${currentDiagnostics.length} → ${newDiagnostics.length})`
+    );
   }
 
   vscode.window.showInformationMessage(`SSOE: ${result.message}`);
@@ -115,6 +144,18 @@ export async function applyJustificationComment(
   if (!result.success) {
     vscode.window.showErrorMessage(`SSOE justification comment failed: ${result.message}`);
     return;
+  }
+
+  // Remove the diagnostic after adding justification comment
+  const currentDiagnostics = diagnosticCollection.get(document.uri);
+  if (currentDiagnostics) {
+    const newDiagnostics = currentDiagnostics.filter(
+      (d) => !areDiagnosticsEqual(d, diagnostic)
+    );
+    diagnosticCollection.set(document.uri, newDiagnostics);
+    logger.log(
+      `Removed diagnostic after justification: ${diagnostic.message} (${currentDiagnostics.length} → ${newDiagnostics.length})`
+    );
   }
 
   vscode.window.showInformationMessage(`SSOE: ${result.message}`);
