@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import OpenAI from "openai";
 import * as logger from "./logger";
+import { chunkFile } from "./astChunker";
 import { EDIT_TOOL, parseEditToolCall, executeEdit, type EditToolInput } from "./tools/edit";
 
 export interface LlmDiagnostic {
@@ -54,10 +55,32 @@ function divider(label: string): string {
 }
 
 export async function scanFile(
-  code: string,
-  languageId: string
+  document: vscode.TextDocument
 ): Promise<LlmDiagnostic[]> {
   const { client, model, maxTokens } = getClient();
+  const code = document.getText();
+  const languageId = document.languageId;
+
+  // Test chunking - log chunks at start of scan
+  try {
+    const chunkResult = await chunkFile(document);
+    if (chunkResult) {
+      logger.log("─── CHUNKING TEST ─────────────────────────");
+      logger.log(`Module context (${chunkResult.moduleContext.split("\n").length} lines):`);
+      logger.log(chunkResult.moduleContext || "(empty)");
+      logger.log(`\nChunks found: ${chunkResult.chunks.length}`);
+      chunkResult.chunks.forEach((chunk, i) => {
+        logger.log(`\n[Chunk ${i + 1}] ${chunk.type}${chunk.name ? " " + chunk.name : ""} (lines ${chunk.range.start.line + 1}-${chunk.range.end.line + 1})`);
+        logger.log(`Hash: ${chunk.hash}`);
+        logger.log(chunk.text.slice(0, 200) + (chunk.text.length > 200 ? "..." : ""));
+      });
+      logger.log("─── END CHUNKING TEST ───────\n");
+    } else {
+      logger.log("─── CHUNKING TEST: chunkFile returned null ───\n");
+    }
+  } catch (chunkError) {
+    logger.log(`─── CHUNKING TEST ERROR: ${chunkError} ───\n`);
+  }
 
   logger.log(divider(`SCAN  [${languageId}]  ${new Date().toLocaleTimeString()}`));
   logger.log(`model: ${model}  max_tokens: ${maxTokens}`);

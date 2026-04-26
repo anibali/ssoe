@@ -49,10 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
         },
         async () => {
           try {
-            const diagnostics = await scanFile(
-              editor.document.getText(),
-              editor.document.languageId
-            );
+        const diagnostics = await scanFile(editor.document);
 
             const vscodeDiagnostics = diagnostics.map((d) => {
               // Line numbers from LLM are 1-indexed; VS Code is 0-indexed
