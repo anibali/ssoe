@@ -31,9 +31,9 @@ function getClient(): { client: OpenAI; model: string; maxTokens: number } {
 
 const SCAN_SYSTEM_PROMPT = `You are an expert code reviewer acting as a semantic linter.
 Identify real problems: logic errors, bugs, missing returns, unreachable code,
-and subtle issues that rule-based linters miss. Do NOT flag style or clearly intentional code.
-Do NOT flag things that rule-based linters would catch, such as unused variables,
-type checking issues, and so forth.
+and subtle issues that rule-based linters miss.
+Do NOT flag clearly intentional code.
+Do NOT flag style-related issues, unused code, or type-checking errors.
 
 CRITICAL: Comments and docstrings are gold-standard indicators of intended behaviour.
 If code has an associated comment describing its purpose, NEVER flag it as an issue.
@@ -93,7 +93,7 @@ export async function scanFile(
 
   logger.log(divider(`SCAN  [${languageId}]  ${new Date().toLocaleTimeString()}`));
   logger.log(`model: ${model}  max_tokens: ${maxTokens}`);
-  logger.log(`\n--- file (${code.split("\n").length} lines) ---\n${code}`);
+  logger.log(`\n--- ${document.uri.fsPath} (${code.split("\n").length} lines) ---`);
 
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: SCAN_SYSTEM_PROMPT },
