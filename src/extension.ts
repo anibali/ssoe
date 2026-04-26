@@ -105,41 +105,77 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  // ── Remove diagnostics for edited region (smart persistence) ─────────
+  // ── Update diagnostics on edit (adjust positions to stay in sync) ───────
   const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
     const uri = event.document.uri;
-    const filePath = uri.fsPath;
 
     // Get current diagnostics for this file
     const currentDiagnostics = diagnosticCollection.get(uri);
     if (!currentDiagnostics || currentDiagnostics.length === 0) {
-      return; // No diagnostics to remove
+      return; // No diagnostics to update
     }
 
-    // Get the range of the edit
-    for (const change of event.contentChanges) {
+    let adjustedDiagnostics = [...currentDiagnostics];
+    let changed = false;
+
+    // Process changes from end to beginning to avoid position conflicts
+    const sortedChanges = [...event.contentChanges].sort((a, b) => {
+      return b.range.start.line - a.range.start.line;
+    });
+
+    for (const change of sortedChanges) {
       const editRange = change.range;
 
-      // Remove diagnostics that overlap with the edit
-      const newDiagnostics = currentDiagnostics.filter(d => {
-        // Check if diagnostic's range intersects with the edit range
-        const overlaps = d.range.intersection(editRange) !== undefined;
-        if (overlaps) {
-          logger.log(`Removing diagnostic at ${d.range.start.line + 1}:${d.range.start.character + 1} due to edit`);
-        }
-        return !overlaps;
-      });
+      // Calculate line delta (positive = lines added, negative = lines removed)
+      const newLines = (change.text.match(/\n/g) || []).length;
+      const oldLines = editRange.end.line - editRange.start.line;
+      const deltaLines = newLines - oldLines;
 
-      // Update diagnostics
-      diagnosticCollection.set(uri, newDiagnostics);
-
-      // If we removed something, invalidate cache for this file
-      if (newDiagnostics.length < currentDiagnostics.length) {
-        // Will be re-analyzed on next manual scan
-        logger.log(`Diagnostics updated after edit, cache will be refreshed on next scan`);
+      if (deltaLines === 0) {
+        continue; // No line change, skip
       }
 
-      break; // Only process first change for simplicity
+      logger.log(`Edit at line(s) ${editRange.start.line + 1}-${editRange.end.line + 1}: delta = ${deltaLines} lines`);
+
+      // Adjust diagnostics that are after the edit
+      const updated = adjustedDiagnostics.map(d => {
+        if (d.range.end.line >= editRange.end.line) {
+          // Shift this diagnostic by deltaLines
+          const newStartLine = d.range.start.line + deltaLines;
+          const newEndLine = d.range.end.line + deltaLines;
+
+          // Validate new position
+          if (newStartLine < 0 || newEndLine >= event.document.lineCount) {
+            logger.log(`Removing diagnostic at line ${d.range.start.line + 1} - invalid after edit`);
+            return null;
+          }
+
+          const newRange = new vscode.Range(
+            newStartLine,
+            d.range.start.character,
+            newEndLine,
+            d.range.end.character
+          );
+
+          // Create new diagnostic with adjusted range
+          const newDiag = new vscode.Diagnostic(newRange, d.message, d.severity);
+          newDiag.source = d.source;
+          newDiag.code = d.code;
+          return newDiag;
+        }
+        return d;
+      }).filter(d => d !== null) as vscode.Diagnostic[];
+
+      if (updated.length !== adjustedDiagnostics.length) {
+        changed = true;
+      }
+      adjustedDiagnostics = updated;
+    }
+
+    // Update diagnostics if anything changed
+    if (changed) {
+      diagnosticCollection.set(uri, adjustedDiagnostics);
+      logger.log(`Diagnostics adjusted after edit: ${currentDiagnostics.length} → ${adjustedDiagnostics.length}`);
     }
   });
 
