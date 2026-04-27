@@ -1,3 +1,5 @@
+_Disclaimer: This project was developed with heavy AI assistance_
+
 # Second Set of Eyes (SSOE)
 
 A VS Code extension that acts as a "semantic linter" using LLMs to provide proactive, stable, and context-aware code diagnostics. Unlike rigid rule-based tools like MyPy and Ruff, SSOE uses AI to catch logic issues and subtle bugs that traditional linters miss.

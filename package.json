@@ -1,10 +1,16 @@
 {
   "name": "ssoe",
+  "publisher": "anibali",
   "displayName": "Second Set of Eyes (SSOE)",
-  "description": "Semantic linter using a LLM to catch logic bugs and subtle issues.",
+  "description": "VS Code extension that uses AI to catch issues traditional linters miss",
   "version": "0.0.1",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.85.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anibali/ssoe"
   },
   "categories": [
     "Linters"
@@ -24,7 +30,10 @@
         "ssoe.provider": {
           "type": "string",
           "default": "openai",
-          "enum": ["openai", "claude-cli"],
+          "enum": [
+            "openai",
+            "claude-cli"
+          ],
           "enumDescriptions": [
             "Use an OpenAI-compatible API endpoint (local or remote).",
             "Shell out to the claude CLI for scanning. Requires the claude CLI to be installed and authenticated."
@@ -66,11 +75,13 @@
     "lint": "eslint src",
     "test": "vitest",
     "test:watch": "vitest watch",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.1",
     "jest-mock-vscode": "^4.12.0",
     "typescript": "^5.3.0",
     "vitest": "^4.1.5"

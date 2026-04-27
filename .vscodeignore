@@ -1,7 +1,10 @@
 .vscode/**
 .vscode-test/**
-out/**
 node_modules/**
+__mocks__/**
+example/**
+**/.mypy_cache/**
+**/*.map
 src/**
 .gitignore
 .yarnrc
