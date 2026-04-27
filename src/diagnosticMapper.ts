@@ -20,16 +20,23 @@ export function resolveIssueLocation(
 ): ResolveIssueResult {
   const { context, verbatim } = diagnostic;
 
-  // Find the context in the file
-  const contextIndex = fileText.indexOf(context);
-  if (contextIndex === -1) {
-    const error = "context not found in file";
-    logger.log(`DiagnosticMapper: ${error}`);
-    return { success: false, error };
+  // Find the context in the file (exact first, then base-indent-offset fallback)
+  let contextIndex = fileText.indexOf(context);
+  let contextEndIndex: number;
+  if (contextIndex !== -1) {
+    contextEndIndex = contextIndex + context.length;
+  } else {
+    const match = findContextWithIndentOffset(fileText, context);
+    if (match === null) {
+      const error = "context not found in file";
+      logger.log(`DiagnosticMapper: ${error}`);
+      return { success: false, error };
+    }
+    contextIndex = match.start;
+    contextEndIndex = match.end;
+    logger.log(`DiagnosticMapper: context matched via indent-offset fallback`);
   }
 
-  // Find the verbatim text within the context region
-  const contextEndIndex = contextIndex + context.length;
   const verbatimIndex = fileText.indexOf(verbatim, contextIndex);
 
   if (verbatimIndex === -1 || verbatimIndex >= contextEndIndex) {
@@ -43,6 +50,54 @@ export function resolveIssueLocation(
   const endPos = indexToPosition(fileText, verbatimIndex + verbatim.length);
 
   return { success: true, range: new vscode.Range(startPos, endPos) };
+}
+
+/**
+ * Fallback context search: the model may drop the common base indent while preserving
+ * relative indentation between lines. For each candidate position, compute the indent
+ * offset that would make the first non-empty context line match the file line, then
+ * verify all remaining lines match with that same offset applied.
+ */
+function findContextWithIndentOffset(
+  fileText: string,
+  context: string
+): { start: number; end: number } | null {
+  const contextLines = context.split("\n");
+  const fileLines = fileText.split("\n");
+
+  const firstNonEmpty = contextLines.findIndex((l) => l.trim().length > 0);
+  if (firstNonEmpty === -1) return null;
+  const ctxLeadLen = (contextLines[firstNonEmpty].match(/^(\s*)/)?.[1] ?? "").length;
+
+  // Build cumulative char offsets for each file line
+  const lineOffsets: number[] = [];
+  let offset = 0;
+  for (const line of fileLines) {
+    lineOffsets.push(offset);
+    offset += line.length + 1;
+  }
+
+  outer: for (let fi = 0; fi <= fileLines.length - contextLines.length; fi++) {
+    // Determine base indent offset from the first non-empty context line
+    const fileLine = fileLines[fi + firstNonEmpty];
+    const fileLeadLen = (fileLine.match(/^(\s*)/)?.[1] ?? "").length;
+    const indentOffset = fileLeadLen - ctxLeadLen;
+    if (indentOffset < 0) continue;
+    const prefix = " ".repeat(indentOffset);
+
+    for (let ci = 0; ci < contextLines.length; ci++) {
+      const expected = contextLines[ci].length === 0 ? "" : prefix + contextLines[ci];
+      if (fileLines[fi + ci] !== expected) continue outer;
+    }
+
+    // All lines matched
+    const start = lineOffsets[fi];
+    const lastFileLine = fi + contextLines.length - 1;
+    const end = lineOffsets[lastFileLine] + fileLines[lastFileLine].length;
+    return { start, end };
+  }
+
+  return null;
 }
 
 /**
