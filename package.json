@@ -21,6 +21,21 @@
     "configuration": {
       "title": "Second Set of Eyes",
       "properties": {
+        "ssoe.provider": {
+          "type": "string",
+          "default": "openai",
+          "enum": ["openai", "claude-cli"],
+          "enumDescriptions": [
+            "Use an OpenAI-compatible API endpoint (local or remote).",
+            "Shell out to the claude CLI for scanning. Requires the claude CLI to be installed and authenticated."
+          ],
+          "description": "Which provider to use for scanning."
+        },
+        "ssoe.claudeModel": {
+          "type": "string",
+          "default": "claude-haiku-4-5-20251001",
+          "description": "Claude model to use when provider is 'claude-cli'."
+        },
         "ssoe.apiKey": {
           "type": "string",
           "default": "not-needed",

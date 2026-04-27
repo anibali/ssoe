@@ -1,9 +1,17 @@
 import * as vscode from "vscode";
+import * as os from "os";
+import * as path from "path";
+import { execFile } from "child_process";
+import { promises as fs } from "fs";
+import { randomBytes } from "crypto";
+import { promisify } from "util";
 import OpenAI from "openai";
 import * as logger from "./logger";
-import { resolveIssueLocation, type ResolveIssueResult } from "./diagnosticMapper";
+import { resolveIssueLocation } from "./diagnosticMapper";
 import { EDIT_TOOL, parseEditToolCall, executeEdit, type EditToolInput } from "./tools/edit";
 import { REPORT_DIAGNOSTICS_TOOL, parseDiagnosticsToolCall, type DiagnosticToolInput } from "./tools/diagnostics";
+
+const execFileAsync = promisify(execFile);
 
 export interface LlmDiagnostic {
   context: string;           // Few surrounding lines
@@ -49,9 +57,33 @@ You MUST use the report_diagnostics tool to report ALL issues found.
 Call it exactly once with the complete list of diagnostics.
 If there are no issues, call it with an empty diagnostics array.`;
 
-const FIX_CODE_SYSTEM_PROMPT = `You are fixing code issues. Use the edit_file tool to apply fixes.
+const FIX_CODE_SYSTEM_PROMPT = `You are fixing code issues. Use the {tool} tool to apply fixes.
 Be precise: keep oldText minimal but unique.
 For multiple changes, include multiple edits in one tool call.`;
+
+const EXTRA_SYSTEM_PROMPT_FOR_CLI = `You MUST respond with ONLY a single JSON object — no prose, no markdown, no code fences.
+The JSON object must have exactly one key, "diagnostics", whose value is an array.
+If there are no issues, respond with: {"diagnostics": []}
+
+Each element of the diagnostics array must be an object with exactly these keys:
+- "context": a few surrounding lines to uniquely locate the issue in the file
+- "verbatim": the exact problematic substring, verbatim within context
+- "description": a short description of the issue
+- "failure_scenario": a concrete completion of "This will cause a problem when..."
+- "severity": one of "error", "warning", or "info"
+
+Example of a valid response:
+{
+  "diagnostics": [
+    {
+      "context": "def process(items):\\n    for item in items:\\n        return result",
+      "verbatim": "return result",
+      "description": "return inside loop exits on first iteration",
+      "failure_scenario": "This will cause a problem when the list has more than one item, as only the first is processed",
+      "severity": "error"
+    }
+  ]
+}`;
 
 const DOCUMENT_INTENTIONAL_SYSTEM_PROMPT = `Add or edit a comment/docstring to explain why a flagged code pattern is intentional.
 
@@ -60,7 +92,7 @@ Be sure to mention that the flagged message is expected to occur and that it's i
 
 If there is an existing comment or docstring near the flagged line that contradicts the flagged behaviour (i.e., it describes a different intended behaviour than what the flagged message points out), you MUST edit that existing comment/docstring to align with the actual intentional behaviour, rather than adding a new comment.
 
-CRITICAL: You MUST use the edit_file tool. Text-only responses are NOT acceptable.
+CRITICAL: You MUST use the {tool} tool. Text-only responses are NOT acceptable.
 
 Rules:
 - First check the surrounding context for existing comments/docstrings. If an existing comment contradicts the flagged message, edit it to correct the contradiction.
@@ -71,7 +103,151 @@ function divider(label: string): string {
   return `\n${"─".repeat(50)}\n${label}\n${"─".repeat(50)}`;
 }
 
+function withTool(prompt: string, tool: string): string {
+  return prompt.replace("{tool}", tool);
+}
+
+function resolveDiagnosticLocations(
+  code: string,
+  diagnostics: DiagnosticToolInput[]
+): {
+  results: LlmDiagnostic[];
+  invalid: Array<{ description: string; context: string; verbatim: string; error: string }>;
+} {
+  const results: LlmDiagnostic[] = [];
+  const invalid: Array<{ description: string; context: string; verbatim: string; error: string }> = [];
+
+  for (const diag of diagnostics) {
+    const resolved = resolveIssueLocation(code, { context: diag.context, verbatim: diag.verbatim });
+    if (resolved.success) {
+      results.push({
+        context: diag.context,
+        verbatim: diag.verbatim,
+        description: diag.description,
+        failure_scenario: diag.failure_scenario,
+        severity: diag.severity === "error" ? "error" : diag.severity === "info" ? "info" : "warning",
+        range: resolved.range,
+      });
+    } else {
+      logger.log(`Warning: Could not resolve location for issue: ${diag.description} (${resolved.error})`);
+      invalid.push({ description: diag.description, context: diag.context, verbatim: diag.verbatim, error: resolved.error });
+    }
+  }
+
+  return { results, invalid };
+}
+
 export async function scanFile(
+  document: vscode.TextDocument
+): Promise<LlmDiagnostic[]> {
+  const cfg = vscode.workspace.getConfiguration("ssoe");
+  const provider = cfg.get<string>("provider", "openai");
+  if (provider === "claude-cli") {
+    return scanFileViaClaude(document);
+  }
+  return scanFileViaOpenAI(document);
+}
+
+async function scanFileViaClaude(document: vscode.TextDocument): Promise<LlmDiagnostic[]> {
+  const cfg = vscode.workspace.getConfiguration("ssoe");
+  const model = cfg.get<string>("claudeModel", "claude-haiku-4-5-20251001");
+  const code = document.getText();
+  const languageId = document.languageId;
+  const MAX_RETRIES = 1;
+
+  logger.log(divider(`SCAN (claude-cli)  [${languageId}]  ${new Date().toLocaleTimeString()}`));
+  logger.log(`model: ${model}`);
+  logger.log(`\n--- ${document.uri.fsPath} (${code.split("\n").length} lines) ---`);
+
+  const userPrompt = `Language: ${languageId}\n\n\`\`\`${languageId}\n${code}\n\`\`\` `;
+  const systemPrompt = `${SCAN_SYSTEM_PROMPT}\n\n${EXTRA_SYSTEM_PROMPT_FOR_CLI}`;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    logger.log(`\n--- scan attempt ${attempt} ---`);
+
+    let stdout: string;
+    try {
+      const execResult = await execFileAsync("claude", [
+        "-p", userPrompt,
+        "--system-prompt", systemPrompt,
+        "--model", model,
+        "--output-format", "json",
+      ]);
+      stdout = execResult.stdout;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`claude CLI failed: ${msg}`);
+      }
+      logger.log(`\n⚠️  claude CLI error, retrying: ${msg}`);
+      continue;
+    }
+
+    logger.log(`\n--- claude CLI output ---\n${stdout}`);
+    logger.show();
+
+    let modelText: string;
+    try {
+      const cliOutput = JSON.parse(stdout) as { result?: string; is_error?: boolean };
+      if (cliOutput.is_error || !cliOutput.result) {
+        throw new Error("CLI reported an error or returned no result");
+      }
+      modelText = cliOutput.result;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`Failed to parse claude CLI envelope: ${msg}`);
+      }
+      logger.log(`\n⚠️  Failed to parse CLI envelope, retrying: ${msg}`);
+      continue;
+    }
+
+    // Strip code fences if the model wrapped the JSON despite instructions
+    const stripped = modelText.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+
+    let diagnostics: DiagnosticToolInput[];
+    try {
+      diagnostics = parseDiagnosticsToolCall(stripped);
+    } catch (parseError) {
+      const msg = parseError instanceof Error ? parseError.message : String(parseError);
+      logger.log(`\n--- parse error ---\n${msg}`);
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`Failed to parse diagnostics from model response: ${msg}`);
+      }
+      logger.log(`\n⚠️  Failed to parse model JSON, retrying`);
+      continue;
+    }
+
+    if (diagnostics.length === 0) {
+      logger.log(`\n--- no issues found ---`);
+      return [];
+    }
+
+    const { results, invalid } = resolveDiagnosticLocations(code, diagnostics);
+
+    if (invalid.length === 0) {
+      logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
+      return results;
+    }
+
+    if (attempt < MAX_RETRIES) {
+      logger.log(`\n⚠️  Invalid diagnostics found (${invalid.length}), retrying`);
+      continue;
+    }
+
+    if (invalid.length > 0) {
+      const msg = `SSOE: ${invalid.length} diagnostic${invalid.length === 1 ? "" : "s"} could not be mapped to file locations after ${MAX_RETRIES} attempts.`;
+      logger.log(`\n⚠️  ${msg}`);
+      vscode.window.showErrorMessage(msg);
+    }
+    logger.log(`\n--- parsed diagnostics (after ${MAX_RETRIES} attempts) ---\n${JSON.stringify(results, null, 2)}`);
+    return results;
+  }
+
+  return [];
+}
+
+async function scanFileViaOpenAI(
   document: vscode.TextDocument
 ): Promise<LlmDiagnostic[]> {
   const { client, model, maxTokens } = getClient();
@@ -160,43 +336,13 @@ export async function scanFile(
       return [];
     }
 
-    // Resolve locations and build results
-    const results: LlmDiagnostic[] = [];
-    const invalidDiagnostics: Array<{ description: string; context: string; verbatim: string; error: string }> = [];
+    const { results, invalid: invalidDiagnostics } = resolveDiagnosticLocations(code, diagnostics);
 
-    for (const diag of diagnostics) {
-      const result: ResolveIssueResult = resolveIssueLocation(code, {
-        context: diag.context,
-        verbatim: diag.verbatim,
-      });
-
-      if (result.success) {
-        results.push({
-          context: diag.context,
-          verbatim: diag.verbatim,
-          description: diag.description,
-          failure_scenario: diag.failure_scenario,
-          severity: diag.severity === "error" ? "error" : diag.severity === "info" ? "info" : "warning",
-          range: result.range,
-        });
-      } else {
-        logger.log(`Warning: Could not resolve location for issue: ${diag.description} (${result.error})`);
-        invalidDiagnostics.push({
-          description: diag.description,
-          context: diag.context,
-          verbatim: diag.verbatim,
-          error: result.error,
-        });
-      }
-    }
-
-    // If all diagnostics are valid, return results
     if (invalidDiagnostics.length === 0) {
       logger.log(`\n--- parsed diagnostics ---\n${JSON.stringify(results, null, 2)}`);
       return results;
     }
 
-    // If we have invalid diagnostics and retries left, send feedback
     if (invalidDiagnostics.length > 0 && attempt < MAX_RETRIES) {
       const invalidList = invalidDiagnostics
         .map(d => `- Description: ${d.description}\n  Context: ${d.context}\n  Verbatim: ${d.verbatim}\n  Error: ${d.error}`)
@@ -221,7 +367,6 @@ export async function scanFile(
       continue;
     }
 
-    // If we've exhausted retries, return valid results (if any)
     if (invalidDiagnostics.length > 0) {
       const invalidCount = invalidDiagnostics.length;
       const message = `SSOE: ${invalidCount} diagnostic${invalidCount === 1 ? '' : 's'} could not be mapped to file locations after ${MAX_RETRIES} attempts.`;
@@ -232,7 +377,6 @@ export async function scanFile(
     return results;
   }
 
-  // Fallback (shouldn't reach here)
   return [];
 }
 
@@ -378,6 +522,79 @@ Do NOT write text. Do NOT explain. Just call the edit_file tool now.`
   return { success: false, message: "Max retries exceeded" };
 }
 
+async function executeWithClaudeTempFile({
+  systemPrompt,
+  buildUserMessage,
+  logLabel,
+  logContext,
+  document,
+  expectedVersion,
+}: {
+  systemPrompt: string;
+  buildUserMessage: (tmpPath: string) => string;
+  logLabel: string;
+  logContext?: string;
+  document: vscode.TextDocument;
+  expectedVersion: number;
+}): Promise<{ success: boolean; message: string }> {
+  const cfg = vscode.workspace.getConfiguration("ssoe");
+  const model = cfg.get<string>("claudeModel", "claude-haiku-4-5-20251001");
+
+  logger.log(divider(`${logLabel}  ${new Date().toLocaleTimeString()}`));
+  if (logContext) logger.log(logContext);
+
+  if (document.version !== expectedVersion) {
+    return { success: false, message: "Document changed before fix could be applied. Please re-select the quick fix." };
+  }
+
+  const originalContent = document.getText();
+  const tmpDir = path.join(os.tmpdir(), `ssoe-${randomBytes(6).toString("hex")}`);
+  await fs.mkdir(tmpDir);
+  const tmpPath = path.join(tmpDir, path.basename(document.uri.fsPath));
+
+  await fs.writeFile(tmpPath, originalContent, "utf8");
+
+  try {
+    const { stdout } = await execFileAsync("claude", [
+      "-p", buildUserMessage(tmpPath),
+      "--system-prompt", systemPrompt,
+      "--model", model,
+      "--add-dir", tmpDir,
+      "--allowedTools", "Read,Edit",
+      "--output-format", "json",
+    ]);
+
+    logger.log(`\n--- claude CLI output ---\n${stdout}`);
+    logger.show();
+
+    const newContent = await fs.readFile(tmpPath, "utf8");
+
+    if (newContent === originalContent) {
+      return { success: false, message: "No changes were made." };
+    }
+
+    if (document.version !== expectedVersion) {
+      return { success: false, message: "Document changed while generating fix. Please re-select the quick fix." };
+    }
+
+    const fullRange = new vscode.Range(
+      document.positionAt(0),
+      document.positionAt(originalContent.length)
+    );
+    const workspaceEdit = new vscode.WorkspaceEdit();
+    workspaceEdit.replace(document.uri, fullRange, newContent);
+
+    const applied = await vscode.workspace.applyEdit(workspaceEdit);
+    if (!applied) {
+      return { success: false, message: "Failed to apply edit to document." };
+    }
+
+    return { success: true, message: `Successfully applied changes to ${path.basename(document.uri.fsPath)}` };
+  } finally {
+    await fs.rm(tmpDir, { recursive: true }).catch(() => {});
+  }
+}
+
 export async function getCodeFix(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic,
@@ -386,11 +603,29 @@ export async function getCodeFix(
   const code = document.getText();
   const filePath = document.uri.fsPath;
   const languageId = document.languageId;
-  const startLine = diagnostic.range.start.line + 1; // 1-indexed
-  const endLine = diagnostic.range.end.line + 1; // 1-indexed
+  const startLine = diagnostic.range.start.line + 1;
+  const endLine = diagnostic.range.end.line + 1;
+
+  const cfg = vscode.workspace.getConfiguration("ssoe");
+  if (cfg.get<string>("provider", "openai") === "claude-cli") {
+    return executeWithClaudeTempFile({
+      systemPrompt: withTool(FIX_CODE_SYSTEM_PROMPT, "Edit"),
+      buildUserMessage: (tmpPath) =>
+        `=== DIAGNOSTIC DETAILS ===\n` +
+        `Language: ${languageId}\n` +
+        `File to edit: ${tmpPath}\n` +
+        `Issue to fix: ${diagnostic.message}\n` +
+        `Affected line range: ${startLine} to ${endLine} (1-indexed)\n\n` +
+        `Use the Read tool to read ${tmpPath}, then use the Edit tool to fix the issue.`,
+      logLabel: `FIX CODE (claude-cli)  ${filePath}`,
+      logContext: `issue: ${diagnostic.message}`,
+      document,
+      expectedVersion,
+    });
+  }
 
   return executeWithToolRetry({
-    systemPrompt: FIX_CODE_SYSTEM_PROMPT,
+    systemPrompt: withTool(FIX_CODE_SYSTEM_PROMPT, "edit_file"),
     userMessage:
       `=== DIAGNOSTIC DETAILS ===\n` +
       `Language: ${languageId}\n` +
@@ -415,11 +650,29 @@ export async function getIntentDoc(
   const code = document.getText();
   const filePath = document.uri.fsPath;
   const languageId = document.languageId;
-  const startLine = diagnostic.range.start.line + 1; // 1-indexed
-  const endLine = diagnostic.range.end.line + 1; // 1-indexed
+  const startLine = diagnostic.range.start.line + 1;
+  const endLine = diagnostic.range.end.line + 1;
+
+  const cfg = vscode.workspace.getConfiguration("ssoe");
+  if (cfg.get<string>("provider", "openai") === "claude-cli") {
+    return executeWithClaudeTempFile({
+      systemPrompt: withTool(DOCUMENT_INTENTIONAL_SYSTEM_PROMPT, "Edit"),
+      buildUserMessage: (tmpPath) =>
+        `=== DIAGNOSTIC DETAILS ===\n` +
+        `Language: ${languageId}\n` +
+        `File to edit: ${tmpPath}\n` +
+        `Flagged as intentional: ${diagnostic.message}\n` +
+        `Affected line range: ${startLine} to ${endLine} (1-indexed)\n\n` +
+        `Use the Read tool to read ${tmpPath}, then use the Edit tool to add/modify comments to document this as intentional, without modifying functional code.`,
+      logLabel: `DOCUMENT INTENTIONAL (claude-cli)  ${filePath}`,
+      logContext: `issue: ${diagnostic.message}`,
+      document,
+      expectedVersion,
+    });
+  }
 
   return executeWithToolRetry({
-    systemPrompt: DOCUMENT_INTENTIONAL_SYSTEM_PROMPT,
+    systemPrompt: withTool(DOCUMENT_INTENTIONAL_SYSTEM_PROMPT, "edit_file"),
     userMessage:
       `=== DIAGNOSTIC DETAILS ===\n` +
       `Language: ${languageId}\n` +
