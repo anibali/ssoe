@@ -572,54 +572,17 @@ async function executeWithClaudeTempFile({
       "--system-prompt", systemPrompt,
       "--model", model,
       "--add-dir", tmpDir,
-      "--allowedTools", "Read",
+      "--allowedTools", "Read,Edit",
       "--output-format", "json",
     ]);
 
     logger.log(`\n--- claude CLI output ---\n${stdout}`);
     logger.show();
 
-    const cliOutput = JSON.parse(stdout) as {
-      is_error?: boolean;
-      permission_denials?: Array<{
-        tool_name: string;
-        tool_input: { file_path: string; old_string: string; new_string: string; replace_all: boolean };
-      }>;
-    };
+    const newContent = await fs.readFile(tmpPath, "utf8");
 
-    if (cliOutput.is_error) {
-      return { success: false, message: "claude CLI returned an error." };
-    }
-
-    // Extract unique Edit denials targeting only our temp file
-    const seen = new Set<string>();
-    const edits = (cliOutput.permission_denials ?? [])
-      .filter(d => d.tool_name === "Edit" && d.tool_input?.file_path === tmpPath)
-      .filter(d => {
-        if (seen.has(d.tool_input.old_string)) return false;
-        seen.add(d.tool_input.old_string);
-        return true;
-      });
-
-    if (edits.length === 0) {
-      return { success: false, message: "No edits were proposed." };
-    }
-
-    logger.log(`\n--- applying ${edits.length} edit(s) from permission_denials ---`);
-
-    // Apply edits sequentially to the document content
-    let newContent = originalContent;
-    for (const edit of edits) {
-      const { old_string, new_string, replace_all } = edit.tool_input;
-      if (replace_all) {
-        newContent = newContent.split(old_string).join(new_string);
-      } else {
-        const idx = newContent.indexOf(old_string);
-        if (idx === -1) {
-          return { success: false, message: `Edit could not be applied: text not found in document.` };
-        }
-        newContent = newContent.slice(0, idx) + new_string + newContent.slice(idx + old_string.length);
-      }
+    if (newContent === originalContent) {
+      return { success: false, message: "No changes were made." };
     }
 
     if (document.version !== expectedVersion) {
@@ -638,7 +601,7 @@ async function executeWithClaudeTempFile({
       return { success: false, message: "Failed to apply edit to document." };
     }
 
-    return { success: true, message: `Successfully applied ${edits.length} edit(s) to ${path.basename(document.uri.fsPath)}` };
+    return { success: true, message: `Successfully applied changes to ${path.basename(document.uri.fsPath)}` };
   } finally {
     await fs.rm(tmpDir, { recursive: true }).catch(() => {});
   }
