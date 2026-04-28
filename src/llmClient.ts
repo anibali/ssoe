@@ -572,8 +572,9 @@ async function executeWithClaudeTempFile({
       "--system-prompt", systemPrompt,
       "--model", model,
       "--add-dir", tmpDir,
-      "--allowedTools", "Read,Edit",
+      "--allowed-tools", "Edit",
       "--output-format", "json",
+      "--no-session-persistence",
     ]);
 
     logger.log(`\n--- claude CLI output ---\n${stdout}`);
@@ -628,7 +629,7 @@ export async function getCodeFix(
         `File to edit: ${tmpPath}\n` +
         `Issue to fix: ${diagnostic.message}\n` +
         `Affected line range: ${startLine} to ${endLine} (1-indexed)\n\n` +
-        `Use the Read tool to read ${tmpPath}, then use the Edit tool to fix the issue.`,
+        `Use the Edit tool to fix the issue.`,
       logLabel: `FIX CODE (claude-cli)  ${filePath}`,
       logContext: `issue: ${diagnostic.message}`,
       document,
