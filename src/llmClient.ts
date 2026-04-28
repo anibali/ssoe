@@ -676,7 +676,7 @@ export async function getIntentDoc(
         `File to edit: ${tmpPath}\n` +
         `Flagged as intentional: ${diagnostic.message}\n` +
         `Affected line range: ${startLine} to ${endLine} (1-indexed)\n\n` +
-        `Use the Read tool to read ${tmpPath}, then use the Edit tool to add/modify comments to document this as intentional, without modifying functional code.`,
+        `Use the Edit tool to add/modify comments to document this as intentional, without modifying functional code.`,
       logLabel: `DOCUMENT INTENTIONAL (claude-cli)  ${filePath}`,
       logContext: `issue: ${diagnostic.message}`,
       document,
