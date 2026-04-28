@@ -153,7 +153,7 @@ async function scanFileViaClaude(document: vscode.TextDocument): Promise<LlmDiag
   const model = cfg.get<string>("claudeModel", "claude-haiku-4-5-20251001");
   const code = document.getText();
   const languageId = document.languageId;
-  const MAX_RETRIES = 1;
+  const MAX_RETRIES = 3;
 
   logger.log(divider(`SCAN (claude-cli)  [${languageId}]  ${new Date().toLocaleTimeString()}`));
   logger.log(`model: ${model}`);
@@ -162,24 +162,28 @@ async function scanFileViaClaude(document: vscode.TextDocument): Promise<LlmDiag
   const userPrompt = `Language: ${languageId}\n\n\`\`\`${languageId}\n${code}\n\`\`\` `;
   const systemPrompt = `${SCAN_SYSTEM_PROMPT}\n\n${EXTRA_SYSTEM_PROMPT_FOR_CLI}`;
 
+  let sessionId: string | undefined;
+  let retryPrompt: string | undefined;
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     logger.log(`\n--- scan attempt ${attempt} ---`);
 
+    const args = sessionId && retryPrompt
+      ? ["--resume", sessionId, "-p", retryPrompt, "--output-format", "json"]
+      : ["-p", userPrompt, "--system-prompt", systemPrompt, "--model", model, "--output-format", "json"];
+
     let stdout: string;
     try {
-      const execResult = await execFileAsync("claude", [
-        "-p", userPrompt,
-        "--system-prompt", systemPrompt,
-        "--model", model,
-        "--output-format", "json",
-      ]);
+      const execResult = await execFileAsync("claude", args);
       stdout = execResult.stdout;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       if (attempt === MAX_RETRIES) {
         throw new Error(`claude CLI failed: ${msg}`);
       }
-      logger.log(`\n⚠️  claude CLI error, retrying: ${msg}`);
+      logger.log(`\n⚠️  claude CLI error, retrying fresh: ${msg}`);
+      sessionId = undefined;
+      retryPrompt = undefined;
       continue;
     }
 
@@ -188,7 +192,8 @@ async function scanFileViaClaude(document: vscode.TextDocument): Promise<LlmDiag
 
     let modelText: string;
     try {
-      const cliOutput = JSON.parse(stdout) as { result?: string; is_error?: boolean };
+      const cliOutput = JSON.parse(stdout) as { result?: string; is_error?: boolean; session_id?: string };
+      sessionId = cliOutput.session_id ?? sessionId;
       if (cliOutput.is_error || !cliOutput.result) {
         throw new Error("CLI reported an error or returned no result");
       }
@@ -198,7 +203,9 @@ async function scanFileViaClaude(document: vscode.TextDocument): Promise<LlmDiag
       if (attempt === MAX_RETRIES) {
         throw new Error(`Failed to parse claude CLI envelope: ${msg}`);
       }
-      logger.log(`\n⚠️  Failed to parse CLI envelope, retrying: ${msg}`);
+      logger.log(`\n⚠️  Failed to parse CLI envelope, retrying fresh: ${msg}`);
+      sessionId = undefined;
+      retryPrompt = undefined;
       continue;
     }
 
@@ -215,6 +222,7 @@ async function scanFileViaClaude(document: vscode.TextDocument): Promise<LlmDiag
         throw new Error(`Failed to parse diagnostics from model response: ${msg}`);
       }
       logger.log(`\n⚠️  Failed to parse model JSON, retrying`);
+      retryPrompt = `ERROR: Your previous response could not be parsed as valid JSON. Parse error: ${msg}\n\nYou MUST respond with ONLY a single valid JSON object — no prose, no markdown, no code fences. Respond again with the correct format.`;
       continue;
     }
 
@@ -231,6 +239,10 @@ async function scanFileViaClaude(document: vscode.TextDocument): Promise<LlmDiag
     }
 
     if (attempt < MAX_RETRIES) {
+      const invalidList = invalid
+        .map(d => `- Description: ${d.description}\n  Context: ${d.context}\n  Verbatim: ${d.verbatim}\n  Error: ${d.error}`)
+        .join("\n");
+      retryPrompt = `ERROR: Some diagnostics could not be located in the source file:\n${invalidList}\n\nPlease regenerate the FULL list of diagnostics, ensuring:\n1. The "context" field exactly matches the surrounding code in the file\n2. The "verbatim" field exactly matches the problematic text within the context\nRespond with the corrected JSON object only.`;
       logger.log(`\n⚠️  Invalid diagnostics found (${invalid.length}), retrying`);
       continue;
     }
