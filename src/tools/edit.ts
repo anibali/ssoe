@@ -102,7 +102,7 @@ export async function executeEdit(
   input: EditToolInput,
   document: vscode.TextDocument,
   expectedVersion: number
-): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
+): Promise<{ success: boolean; message: string; applied?: number }> {
   try {
     return executeEditInDocument(input, document, expectedVersion);
   } catch (error) {
@@ -121,7 +121,7 @@ async function executeEditInDocument(
   input: EditToolInput,
   document: vscode.TextDocument,
   expectedVersion: number
-): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
+): Promise<{ success: boolean; message: string; applied?: number }> {
   // Check if document changed since we started
   if (document.version !== expectedVersion) {
     throw new Error(
@@ -131,22 +131,6 @@ async function executeEditInDocument(
 
   // Get in-memory content
   const content = document.getText();
-  const editedRanges: Array<{ range: vscode.Range; lineDelta: number }> = [];
-
-  // Calculate edited ranges and line deltas before applying
-  let offset = 0;
-  for (const edit of input.edits) {
-    const index = content.indexOf(edit.oldText, offset);
-    if (index !== -1) {
-      const startPos = document.positionAt(index);
-      const endPos = document.positionAt(index + edit.oldText.length);
-      const oldLines = edit.oldText.split('\n').length;
-      const newLines = edit.newText.split('\n').length;
-      const lineDelta = newLines - oldLines;
-      editedRanges.push({ range: new vscode.Range(startPos, endPos), lineDelta });
-      offset = index + edit.oldText.length;
-    }
-  }
 
   // Apply edits to content
   let result: string;
@@ -161,13 +145,6 @@ async function executeEditInDocument(
       message: error instanceof Error ? error.message : String(error),
     };
   }
-
-  // Log edited ranges for debugging
-  logger.log('\n--- Edited ranges ---');
-  for (const edited of editedRanges) {
-    logger.log(`Range: ${edited.range.start.line}-${edited.range.end.line}, lineDelta: ${edited.lineDelta}`);
-  }
-  logger.show();
 
   // Create workspace edit - apply edits granularly using original positions
   // VS Code applies all edits atomically, so positions should be relative to original document
@@ -198,7 +175,6 @@ async function executeEditInDocument(
     success: true,
     message: `Successfully applied ${applied} edit(s) to ${path.basename(document.uri.fsPath)}`,
     applied,
-    editedRanges,
   };
 }
 

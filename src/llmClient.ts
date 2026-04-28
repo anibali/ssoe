@@ -408,7 +408,7 @@ async function executeWithToolRetry({
   logContext,
   document,
   expectedVersion,
-}: ToolEditOptions): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
+}: ToolEditOptions): Promise<{ success: boolean; message: string; applied?: number }> {
   const { client, model } = getClient();
   const MAX_RETRIES = 3;
 
@@ -509,7 +509,7 @@ Do NOT write text. Do NOT explain. Just call the edit_file tool now.`
 
     if (attempt === MAX_RETRIES) {
       logger.show();
-      return { success: false, message: "Max retries exceeded", editedRanges: undefined };
+      return { success: false, message: "Max retries exceeded" };
     }
 
     logger.log(`\n--- retrying after failure: ${result.message} ---`);
@@ -658,7 +658,7 @@ export async function getIntentDoc(
   document: vscode.TextDocument,
   diagnostic: vscode.Diagnostic,
   expectedVersion: number
-): Promise<{ success: boolean; message: string; applied?: number; editedRanges?: Array<{ range: vscode.Range; lineDelta: number }> }> {
+): Promise<{ success: boolean; message: string; applied?: number }> {
   const code = document.getText();
   const filePath = document.uri.fsPath;
   const languageId = document.languageId;
